@@ -1,0 +1,4 @@
+aiogram>=3.15,<4
+aiosqlite>=0.20,<1
+Pillow>=10,<12
+python-dotenv>=1,<2
