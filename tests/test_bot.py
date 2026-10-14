@@ -8,7 +8,7 @@ from pathlib import Path
 from pipisa.day import next_midnight
 
 from pipisa.db import Database
-from pipisa.stats_card import CardData, render_stats
+from pipisa.stats_card import CardData, _font, render_stats
 from pipisa.texts import format_wait, plural
 from pipisa.transfer import ImportItem, parse_import_text, parse_size
 
@@ -205,6 +205,13 @@ class CardTests(unittest.TestCase):
         )
         self.assertTrue(png.startswith(b"\x89PNG"))
         self.assertGreater(len(png), 5000)
+
+    def test_cyrillic_glyphs(self) -> None:
+        font = _font(40, bold=True)
+        cyrillic = bytes(font.getmask("ЛИНЕЙКА"))
+        missing = bytes(font.getmask("\ue000"))
+        self.assertNotEqual(cyrillic, missing)
+        self.assertGreater(sum(cyrillic), 0)
 
 
 if __name__ == "__main__":

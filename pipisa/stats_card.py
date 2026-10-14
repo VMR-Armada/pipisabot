@@ -116,28 +116,35 @@ def _draw_bars(draw: ImageDraw.ImageDraw, deltas: list[int], font: ImageFont.Ima
         x += bar_w + gap
 
 
+_FONT_DIR = Path(__file__).resolve().parent / "fonts"
+
+
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     path = _font_path(bold)
     if path is not None:
-        return ImageFont.truetype(str(path), size=size)
+        return ImageFont.truetype(path, size=size)
     return ImageFont.load_default(size=size)
 
 
 def _font_path(bold: bool) -> Path | None:
-    regular = (
-        Path(r"C:\Windows\Fonts\arial.ttf"),
-        Path(r"C:\Windows\Fonts\segoeui.ttf"),
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-        Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+    bundled = _FONT_DIR / ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf")
+    system = (
+        (
+            Path(r"C:\Windows\Fonts\arialbd.ttf"),
+            Path(r"C:\Windows\Fonts\segoeuib.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+            Path("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
+        )
+        if bold
+        else (
+            Path(r"C:\Windows\Fonts\arial.ttf"),
+            Path(r"C:\Windows\Fonts\segoeui.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+        )
     )
-    heavy = (
-        Path(r"C:\Windows\Fonts\arialbd.ttf"),
-        Path(r"C:\Windows\Fonts\segoeuib.ttf"),
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
-        Path("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
-    )
-    for path in heavy if bold else regular:
-        if path.exists():
+    for path in (bundled, *system):
+        if path.is_file():
             return path
     return None
 
