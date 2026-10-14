@@ -26,6 +26,32 @@ class GrowResult:
 
 
 @dataclass
+class Duel:
+    id: int
+    chat_id: int
+    challenger_id: int
+    opponent_id: int
+    status: str
+    challenger_name: str
+    challenger_username: str | None
+    opponent_name: str
+    opponent_username: str | None
+
+
+@dataclass
+class DuelOutcome:
+    challenger_roll: int
+    opponent_roll: int
+    diff: int
+    challenger_size: int
+    opponent_size: int
+    challenger_name: str
+    challenger_username: str | None
+    opponent_name: str
+    opponent_username: str | None
+
+
+@dataclass
 class Entry:
     user_id: int
     chat_id: int
@@ -112,6 +138,17 @@ class Database:
                 ON plays(user_id, chat_id, id);
             CREATE INDEX IF NOT EXISTS idx_players_chat_size
                 ON players(chat_id, size DESC);
+
+            CREATE TABLE IF NOT EXISTS duels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                challenger_id INTEGER NOT NULL,
+                opponent_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                challenger_roll INTEGER,
+                opponent_roll INTEGER,
+                created_at INTEGER NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS imported (
                 chat_id INTEGER NOT NULL,
@@ -255,6 +292,154 @@ class Database:
                 username=row["username"],
                 chat_title=row["chat_title"],
             )
+
+    async def find_player(self, user_id: int, chat_id: int) -> Entry | None:
+        async with self._lock:
+            row = await self._get_row(user_id, chat_id)
+            if row is None or int(row["plays"]) <= 0:
+                return None
+            return _entry(row)
+
+    async def find_player_by_username(self, chat_id: int, username: str) -> Entry | None:
+        async with self._lock:
+            cursor = await self.conn.execute(
+                """
+                SELECT user_id, chat_id, size, username, first_name, chat_title
+                FROM players
+                WHERE chat_id = ? AND lower(username) = ? AND plays > 0
+                LIMIT 1
+                """,
+                (chat_id, username.lower()),
+            )
+            row = await cursor.fetchone()
+            return _entry(row) if row is not None else None
+
+    async def create_duel(self, *, chat_id: int, challenger_id: int, opponent_id: int) -> int | None:
+        if challenger_id == opponent_id:
+            return None
+        async with self._lock:
+            try:
+                cursor = await self.conn.execute(
+                    """
+                    SELECT id FROM duels
+                    WHERE chat_id = ? AND status IN ('pending', 'rolling')
+                      AND (
+                        (challenger_id = ? AND opponent_id = ?)
+                        OR (challenger_id = ? AND opponent_id = ?)
+                      )
+                    LIMIT 1
+                    """,
+                    (chat_id, challenger_id, opponent_id, opponent_id, challenger_id),
+                )
+                if await cursor.fetchone() is not None:
+                    await self.conn.commit()
+                    return None
+                cursor = await self.conn.execute(
+                    """
+                    INSERT INTO duels (chat_id, challenger_id, opponent_id, status, created_at)
+                    VALUES (?, ?, ?, 'pending', ?)
+                    """,
+                    (chat_id, challenger_id, opponent_id, self._clock()),
+                )
+                await self.conn.commit()
+                return int(cursor.lastrowid)
+            except Exception:
+                await self.conn.rollback()
+                raise
+
+    async def get_duel(self, duel_id: int) -> Duel | None:
+        async with self._lock:
+            return await self._duel(duel_id)
+
+    async def claim_duel(self, duel_id: int, user_id: int) -> bool:
+        async with self._lock:
+            try:
+                cursor = await self.conn.execute(
+                    """
+                    UPDATE duels
+                    SET status = 'rolling'
+                    WHERE id = ? AND opponent_id = ? AND status = 'pending'
+                    """,
+                    (duel_id, user_id),
+                )
+                await self.conn.commit()
+                return cursor.rowcount == 1
+            except Exception:
+                await self.conn.rollback()
+                raise
+
+    async def release_duel(self, duel_id: int) -> None:
+        async with self._lock:
+            await self.conn.execute(
+                "UPDATE duels SET status = 'pending' WHERE id = ? AND status = 'rolling'",
+                (duel_id,),
+            )
+            await self.conn.commit()
+
+    async def decline_duel(self, duel_id: int, user_id: int) -> bool:
+        async with self._lock:
+            try:
+                cursor = await self.conn.execute(
+                    """
+                    UPDATE duels
+                    SET status = 'declined'
+                    WHERE id = ? AND opponent_id = ? AND status = 'pending'
+                    """,
+                    (duel_id, user_id),
+                )
+                await self.conn.commit()
+                return cursor.rowcount == 1
+            except Exception:
+                await self.conn.rollback()
+                raise
+
+    async def apply_duel(self, duel_id: int, challenger_roll: int, opponent_roll: int) -> DuelOutcome | None:
+        if not 1 <= challenger_roll <= 6 or not 1 <= opponent_roll <= 6:
+            raise ValueError("На кубике может выпасть только число от 1 до 6")
+        async with self._lock:
+            try:
+                duel = await self._duel(duel_id)
+                if duel is None or duel.status != "rolling":
+                    await self.conn.commit()
+                    return None
+                diff = abs(challenger_roll - opponent_roll)
+                challenger_delta = 0
+                opponent_delta = 0
+                if challenger_roll > opponent_roll:
+                    challenger_delta = diff
+                    opponent_delta = -diff
+                elif opponent_roll > challenger_roll:
+                    challenger_delta = -diff
+                    opponent_delta = diff
+                await self._add_size(duel.chat_id, duel.challenger_id, challenger_delta)
+                await self._add_size(duel.chat_id, duel.opponent_id, opponent_delta)
+                await self.conn.execute(
+                    """
+                    UPDATE duels
+                    SET status = 'done', challenger_roll = ?, opponent_roll = ?
+                    WHERE id = ? AND status = 'rolling'
+                    """,
+                    (challenger_roll, opponent_roll, duel_id),
+                )
+                challenger = await self._get_row(duel.challenger_id, duel.chat_id)
+                opponent = await self._get_row(duel.opponent_id, duel.chat_id)
+                await self.conn.commit()
+                if challenger is None or opponent is None:
+                    return None
+                return DuelOutcome(
+                    challenger_roll=challenger_roll,
+                    opponent_roll=opponent_roll,
+                    diff=diff,
+                    challenger_size=int(challenger["size"]),
+                    opponent_size=int(opponent["size"]),
+                    challenger_name=duel.challenger_name,
+                    challenger_username=duel.challenger_username,
+                    opponent_name=duel.opponent_name,
+                    opponent_username=duel.opponent_username,
+                )
+            except Exception:
+                await self.conn.rollback()
+                raise
 
     async def set_size(
         self,
@@ -459,6 +644,43 @@ class Database:
         if row is None:
             return None
         return int(row["played_at"])
+
+    async def _add_size(self, chat_id: int, user_id: int, delta: int) -> None:
+        if delta == 0:
+            return
+        await self.conn.execute(
+            "UPDATE players SET size = size + ? WHERE user_id = ? AND chat_id = ?",
+            (delta, user_id, chat_id),
+        )
+
+    async def _duel(self, duel_id: int) -> Duel | None:
+        cursor = await self.conn.execute(
+            """
+            SELECT
+                d.id, d.chat_id, d.challenger_id, d.opponent_id, d.status,
+                c.first_name AS challenger_name, c.username AS challenger_username,
+                o.first_name AS opponent_name, o.username AS opponent_username
+            FROM duels d
+            JOIN players c ON c.user_id = d.challenger_id AND c.chat_id = d.chat_id
+            JOIN players o ON o.user_id = d.opponent_id AND o.chat_id = d.chat_id
+            WHERE d.id = ?
+            """,
+            (duel_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return Duel(
+            id=int(row["id"]),
+            chat_id=int(row["chat_id"]),
+            challenger_id=int(row["challenger_id"]),
+            opponent_id=int(row["opponent_id"]),
+            status=row["status"],
+            challenger_name=row["challenger_name"],
+            challenger_username=row["challenger_username"],
+            opponent_name=row["opponent_name"],
+            opponent_username=row["opponent_username"],
+        )
 
     async def _get_row(self, user_id: int, chat_id: int) -> aiosqlite.Row | None:
         cursor = await self.conn.execute(

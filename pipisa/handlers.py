@@ -1,14 +1,24 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
+import re
 import time
 
-from aiogram import Bot, Router
+from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import BufferedInputFile, ChatMemberUpdated, Message, User
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    ChatMemberUpdated,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    User,
+)
 
 from pipisa.db import Database, Entry, Standing
 from pipisa.stats_card import CardData, render_stats
@@ -20,6 +30,8 @@ from pipisa.texts import (
     PRIVATE_WELCOME,
     cooldown_message,
     display_name,
+    duel_challenge,
+    duel_result,
     escape_name,
     format_cm,
     format_wait,
@@ -300,6 +312,135 @@ async def cmd_import(message: Message, db: Database, bot: Bot) -> None:
         items=items,
     )
     await message.reply(_import_report(applied, pending, broken))
+
+
+_NICK = re.compile(r"^@?([A-Za-z0-9_]{4,})$")
+
+
+def _duel_username(args: str | None) -> str | None:
+    token = (args or "").strip().split(maxsplit=1)[0] if args else ""
+    match = _NICK.fullmatch(token)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def _duel_keyboard(duel_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Принять", callback_data=f"duel:ok:{duel_id}"),
+                InlineKeyboardButton(text="Отказаться", callback_data=f"duel:no:{duel_id}"),
+            ]
+        ]
+    )
+
+
+@router.message(Command("duel"))
+async def cmd_duel(message: Message, command: CommandObject, db: Database) -> None:
+    if message.from_user is None or message.from_user.is_bot:
+        return
+    if not _is_group(message):
+        await message.answer(GROUP_ONLY)
+        return
+    challenger_id, challenger_username, challenger_first = _person(message)
+    challenger = await db.find_player(challenger_id, message.chat.id)
+    if challenger is None:
+        await message.reply("Сначала сделай /dick, чтобы было что ставить на дуэль.")
+        return
+    username = _duel_username(command.args)
+    if username is None:
+        await message.reply("Напиши ник соперника: /duel @nickname")
+        return
+    if challenger_username and username.lower() == challenger_username.lower():
+        await message.reply("Себе вызвать нельзя.")
+        return
+    opponent = await db.find_player_by_username(message.chat.id, username)
+    if opponent is None:
+        await message.reply(
+            f"Не знаю @{html.escape(username)} в этом чате. "
+            "Соперник должен хотя бы раз сделать /dick."
+        )
+        return
+    if opponent.user_id == challenger_id:
+        await message.reply("Себе вызвать нельзя.")
+        return
+    duel_id = await db.create_duel(
+        chat_id=message.chat.id,
+        challenger_id=challenger_id,
+        opponent_id=opponent.user_id,
+    )
+    if duel_id is None:
+        await message.reply("Между вами уже есть неотвеченный вызов.")
+        return
+    await message.reply(
+        duel_challenge(
+            escape_name(challenger_first, challenger_username, challenger_id),
+            escape_name(opponent.first_name, opponent.username, opponent.user_id),
+        ),
+        reply_markup=_duel_keyboard(duel_id),
+    )
+
+
+@router.callback_query(F.data.startswith("duel:"))
+async def cb_duel(query: CallbackQuery, db: Database) -> None:
+    if query.from_user is None or query.data is None or not isinstance(query.message, Message):
+        return
+    parts = query.data.split(":")
+    if len(parts) != 3 or parts[1] not in {"ok", "no"}:
+        await query.answer("Не понял кнопку.", show_alert=True)
+        return
+    try:
+        duel_id = int(parts[2])
+    except ValueError:
+        await query.answer("Не понял кнопку.", show_alert=True)
+        return
+    duel = await db.get_duel(duel_id)
+    if duel is None or query.message.chat.id != duel.chat_id:
+        await query.answer("Дуэль не найдена.", show_alert=True)
+        return
+    if query.from_user.id != duel.opponent_id:
+        await query.answer("Ответить может только тот, кого вызвали.", show_alert=True)
+        return
+    if parts[1] == "no":
+        declined = await db.decline_duel(duel_id, query.from_user.id)
+        if not declined:
+            await query.answer("Эта дуэль уже закрыта.", show_alert=True)
+            return
+        await query.answer()
+        opponent = escape_name(duel.opponent_name, duel.opponent_username, duel.opponent_id)
+        await query.message.edit_text(f"{opponent} отказался от дуэли.", reply_markup=None)
+        return
+
+    claimed = await db.claim_duel(duel_id, query.from_user.id)
+    if not claimed:
+        await query.answer("Эта дуэль уже закрыта.", show_alert=True)
+        return
+    await query.answer()
+    challenger = escape_name(duel.challenger_name, duel.challenger_username, duel.challenger_id)
+    opponent = escape_name(duel.opponent_name, duel.opponent_username, duel.opponent_id)
+    await query.message.edit_text(
+        f"{challenger} против {opponent}. Бросаем кубики.",
+        reply_markup=None,
+    )
+    try:
+        await query.message.answer(f"Кубик {challenger}")
+        first = await query.message.answer_dice(emoji="🎲")
+        await query.message.answer(f"Кубик {opponent}")
+        second = await query.message.answer_dice(emoji="🎲")
+        if first.dice is None or second.dice is None:
+            raise RuntimeError("Telegram не вернул значение кубика")
+        await asyncio.sleep(4)
+        outcome = await db.apply_duel(duel_id, first.dice.value, second.dice.value)
+    except Exception:
+        logger.exception("Не удалось доиграть дуэль %s", duel_id)
+        await db.release_duel(duel_id)
+        await query.message.answer("Кубики не бросились. Вызов снова можно принять.")
+        return
+    if outcome is None:
+        await query.message.answer("Эта дуэль уже посчитана.")
+        return
+    await query.message.answer(duel_result(outcome))
 
 
 @router.message(Command("set"))

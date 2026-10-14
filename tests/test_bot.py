@@ -185,6 +185,49 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         entries, _standing = await self.db.chat_top(-100, 1)
         self.assertEqual([entry.size for entry in entries], [31, -5])
 
+    async def test_duel_takes_the_difference(self) -> None:
+        await self.db.set_size(
+            user_id=1,
+            chat_id=-100,
+            username="anna",
+            first_name="Анна",
+            chat_title="Чат",
+            size=20,
+        )
+        await self.db.set_size(
+            user_id=2,
+            chat_id=-100,
+            username="boris",
+            first_name="Борис",
+            chat_title="Чат",
+            size=15,
+        )
+        found = await self.db.find_player_by_username(-100, "Boris")
+        assert found is not None
+        self.assertEqual(found.user_id, 2)
+
+        duel_id = await self.db.create_duel(chat_id=-100, challenger_id=1, opponent_id=2)
+        assert duel_id is not None
+        self.assertIsNone(await self.db.create_duel(chat_id=-100, challenger_id=1, opponent_id=2))
+        self.assertFalse(await self.db.claim_duel(duel_id, 1))
+        self.assertTrue(await self.db.claim_duel(duel_id, 2))
+
+        outcome = await self.db.apply_duel(duel_id, 6, 2)
+        assert outcome is not None
+        self.assertEqual(outcome.diff, 4)
+        self.assertEqual(outcome.challenger_size, 24)
+        self.assertEqual(outcome.opponent_size, 11)
+        self.assertIsNone(await self.db.apply_duel(duel_id, 6, 2))
+
+        tie_id = await self.db.create_duel(chat_id=-100, challenger_id=2, opponent_id=1)
+        assert tie_id is not None
+        self.assertTrue(await self.db.decline_duel(tie_id, 1))
+        anna = await self.db.find_player(1, -100)
+        boris = await self.db.find_player(2, -100)
+        assert anna is not None and boris is not None
+        self.assertEqual(anna.size, 24)
+        self.assertEqual(boris.size, 11)
+
 
 class CardTests(unittest.TestCase):
     def test_png(self) -> None:

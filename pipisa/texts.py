@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import html
 import random
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pipisa.db import DuelOutcome
 
 HELP_TEXT = (
     "Я линейка — шуточная игра для групповых чатов.\n\n"
@@ -12,6 +16,7 @@ HELP_TEXT = (
     "/top_dick — топ 10 этого чата\n"
     "/global_top — топ 10 по всем чатам\n"
     "/stats — карточка статистики\n"
+    "/duel @ник — дуэль на кубиках, если соперник согласится\n"
     "/help — эта справка\n\n"
     "Админ чата может перенести уже известные размеры:\n"
     "/import — списком, каждая строка как @ник 120\n"
@@ -148,6 +153,37 @@ def grow_message(
     else:
         lines.append("Следующий замер уже доступен.")
     return "\n".join(lines)
+
+
+def duel_challenge(challenger: str, opponent: str) -> str:
+    return (
+        f"📏 {challenger} вызывает {opponent} на дуэль.\n"
+        "Каждый бросает кубик от 1 до 6. У кого число больше, "
+        "тот забирает у соперника разницу."
+    )
+
+
+def duel_result(outcome: DuelOutcome) -> str:
+    challenger = escape_name(outcome.challenger_name, outcome.challenger_username, 0)
+    opponent = escape_name(outcome.opponent_name, outcome.opponent_username, 0)
+    if outcome.diff == 0:
+        return (
+            f"Ничья: оба выбросили <b>{outcome.challenger_roll}</b>.\n"
+            "Размеры не изменились."
+        )
+    if outcome.challenger_roll > outcome.opponent_roll:
+        winner, winner_size = challenger, outcome.challenger_size
+        loser, loser_size = opponent, outcome.opponent_size
+    else:
+        winner, winner_size = opponent, outcome.opponent_size
+        loser, loser_size = challenger, outcome.challenger_size
+    return (
+        f"{challenger} выбросил <b>{outcome.challenger_roll}</b>, "
+        f"{opponent} — <b>{outcome.opponent_roll}</b>.\n"
+        f"{winner} забирает <b>{outcome.diff} см</b>.\n"
+        f"{winner}: <b>{format_cm(winner_size)}</b>.\n"
+        f"{loser}: <b>{format_cm(loser_size)}</b>."
+    )
 
 
 def cooldown_message(
