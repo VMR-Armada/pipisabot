@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import timezone
 from pathlib import Path
+
+from pipisa.day import next_midnight
 
 from pipisa.db import Database
 from pipisa.stats_card import CardData, render_stats
@@ -47,11 +50,12 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._dir = tempfile.TemporaryDirectory()
         self.now = 1_700_000_000
+        self.zone = timezone.utc
         self.db = Database(
             Path(self._dir.name) / "test.db",
             grow_min=-5,
             grow_max=10,
-            cooldown_seconds=100,
+            zone=self.zone,
             clock=lambda: self.now,
         )
         await self.db.connect()
@@ -73,6 +77,8 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.delta, 4)
         self.assertEqual(first.size, 4)
 
+        played_at = self.now
+        boundary = next_midnight(played_at, self.zone)
         self.now += 40
         blocked = await self.db.try_grow(
             user_id=1,
@@ -83,8 +89,9 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             rng=lambda: 9,
         )
         self.assertFalse(blocked.ok)
-        self.assertEqual(blocked.wait_seconds, 60)
+        self.assertEqual(blocked.wait_seconds, boundary - self.now)
         self.assertEqual(blocked.size, 4)
+        self.assertLess(blocked.wait_seconds, 24 * 3600)
 
         await self.db.try_grow(
             user_id=2,
@@ -119,7 +126,7 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(global_standing.size, 8)
         self.assertEqual(global_standing.rank, 2)
 
-        self.now += 60
+        self.now = boundary
         free_again = await self.db.try_grow(
             user_id=1,
             chat_id=-100,

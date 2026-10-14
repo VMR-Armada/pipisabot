@@ -5,8 +5,9 @@ import random
 
 HELP_TEXT = (
     "Я линейка — шуточная игра для групповых чатов.\n\n"
-    "В каждом чате у игрока своя длина. Раз в 24 часа /dick "
-    "меняет её на случайное целое число от −5 до +10 см.\n\n"
+    "В каждом чате у игрока своя длина. Один раз за календарный день /dick "
+    "меняет её на случайное целое число от −5 до +10 см. "
+    "На следующий день замер снова доступен, даже если 24 часа ещё не прошли.\n\n"
     "/dick — сделать замер\n"
     "/top_dick — топ 10 этого чата\n"
     "/global_top — топ 10 по всем чатам\n"
@@ -143,7 +144,7 @@ def grow_message(
         _flavor(delta),
     ]
     if wait_seconds > 0:
-        lines.append(f"Следующий замер через {format_wait(wait_seconds)}.")
+        lines.append(f"Следующий замер — завтра, через {format_wait(wait_seconds)}.")
     else:
         lines.append("Следующий замер уже доступен.")
     return "\n".join(lines)
@@ -159,9 +160,9 @@ def cooldown_message(
 ) -> str:
     name = escape_name(first_name, username, user_id)
     return (
-        f"📏 <b>{name}</b>, замер уже был.\n"
+        f"📏 <b>{name}</b>, замер на сегодня уже был.\n"
         f"Сейчас: <b>{format_cm(size)}</b>.\n"
-        f"Следующий через {format_wait(wait_seconds)}."
+        f"Завтра можно снова, через {format_wait(wait_seconds)}."
     )
 
 

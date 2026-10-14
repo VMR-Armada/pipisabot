@@ -5,10 +5,12 @@ import random
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import tzinfo
 from pathlib import Path
 
 import aiosqlite
 
+from pipisa.day import can_play, next_midnight, seconds_until_next_day
 from pipisa.transfer import ImportItem
 
 Clock = Callable[[], int]
@@ -62,13 +64,13 @@ class Database:
         *,
         grow_min: int,
         grow_max: int,
-        cooldown_seconds: int,
+        zone: tzinfo,
         clock: Clock | None = None,
     ) -> None:
         self.path = str(path)
         self.grow_min = grow_min
         self.grow_max = grow_max
-        self.cooldown_seconds = cooldown_seconds
+        self.zone = zone
         self._clock = clock or (lambda: int(time.time()))
         self._db: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
@@ -159,16 +161,16 @@ class Database:
                 if row is None:
                     raise RuntimeError("Игрок не создался")
                 now = self._clock()
-                next_free_at = row["next_free_at"]
-                if next_free_at is not None and now < int(next_free_at):
+                last_played = await self._last_played_at(user_id, chat_id)
+                if not can_play(now, last_played, self.zone):
                     await self.conn.commit()
                     return GrowResult(
                         ok=False,
                         size=int(row["size"]),
-                        wait_seconds=int(next_free_at) - now,
+                        wait_seconds=seconds_until_next_day(now, self.zone),
                     )
 
-                scheduled = now + self.cooldown_seconds
+                scheduled = next_midnight(now, self.zone)
                 delta = int(roll())
                 if delta < self.grow_min or delta > self.grow_max:
                     raise ValueError("Случайное изменение вне допустимого диапазона")
@@ -237,6 +239,9 @@ class Database:
             )
             deltas = [int(item["delta"]) for item in await cursor.fetchall()]
             deltas.reverse()
+            last_played = await self._last_played_at(user_id, chat_id)
+            now = self._clock()
+            available_at = None if can_play(now, last_played, self.zone) else next_midnight(now, self.zone)
             return Stats(
                 size=int(row["size"]),
                 rank=standing.rank,
@@ -244,7 +249,7 @@ class Database:
                 plays=int(row["plays"]),
                 best_gain=int(row["best_gain"]),
                 worst_loss=int(row["worst_loss"]),
-                next_free_at=row["next_free_at"],
+                next_free_at=available_at,
                 deltas=deltas,
                 first_name=row["first_name"],
                 username=row["username"],
@@ -439,6 +444,21 @@ class Database:
             """,
             (user_id, chat_id, username, first_name or "Игрок", chat_title, self._clock()),
         )
+
+    async def _last_played_at(self, user_id: int, chat_id: int) -> int | None:
+        cursor = await self.conn.execute(
+            """
+            SELECT played_at FROM plays
+            WHERE user_id = ? AND chat_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (user_id, chat_id),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return int(row["played_at"])
 
     async def _get_row(self, user_id: int, chat_id: int) -> aiosqlite.Row | None:
         cursor = await self.conn.execute(

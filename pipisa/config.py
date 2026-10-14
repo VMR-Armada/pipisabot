@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import tzinfo
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
@@ -15,7 +17,7 @@ class Config:
     db_path: Path
     grow_min: int
     grow_max: int
-    cooldown_seconds: int
+    zone: tzinfo
 
     @classmethod
     def from_env(cls) -> Config:
@@ -35,19 +37,21 @@ class Config:
 
         grow_min = _env_int("GROW_MIN", -5)
         grow_max = _env_int("GROW_MAX", 10)
-        cooldown_hours = _env_int("COOLDOWN_HOURS", 24)
+        zone_name = os.getenv("TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow"
 
         if grow_min > grow_max:
             raise SystemExit("GROW_MIN не может быть больше GROW_MAX.")
-        if cooldown_hours <= 0:
-            raise SystemExit("COOLDOWN_HOURS должен быть больше нуля.")
+        try:
+            zone = ZoneInfo(zone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise SystemExit(f"Неизвестный часовой пояс TIMEZONE={zone_name}.") from exc
 
         return cls(
             bot_token=token,
             db_path=db_path,
             grow_min=grow_min,
             grow_max=grow_max,
-            cooldown_seconds=cooldown_hours * 3600,
+            zone=zone,
         )
 
 

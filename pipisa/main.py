@@ -35,7 +35,7 @@ async def _setup_bot(bot: Bot) -> None:
     await bot.set_my_commands(PRIVATE_COMMANDS, scope=BotCommandScopeAllPrivateChats())
     await bot.set_my_short_description("Ежедневная линейка для чатов")
     await bot.set_my_description(
-        "Шуточная игра для групп. Раз в сутки случайный замер от −5 до +10 см, "
+        "Шуточная игра для групп. Раз в календарный день случайный замер от −5 до +10 см, "
         "топы чата и общий топ."
     )
 
@@ -45,7 +45,7 @@ async def run(config: Config) -> None:
         config.db_path,
         grow_min=config.grow_min,
         grow_max=config.grow_max,
-        cooldown_seconds=config.cooldown_seconds,
+        zone=config.zone,
     )
     await db.connect()
     bot = Bot(
