@@ -6,6 +6,7 @@ from unittest.mock import patch
 from datetime import timezone
 from pathlib import Path
 
+from pipisa.battlecup import countdown_seconds
 from pipisa.day import next_midnight
 
 from pipisa.db import BattlecupOutcome, BattlecupPayout, Database, Entry, prize_shares
@@ -70,6 +71,14 @@ class TextTests(unittest.TestCase):
         self.assertIn("Анна, кегли сегодня были на твоей стороне.", text)
         self.assertIn("Вова, шар увидел кегли и сделал вид, что их нет.", text)
         self.assertNotIn("Борис, шар", text)
+
+    def test_battlecup_countdown_steps_once_a_minute(self) -> None:
+        start = 1_000
+        self.assertEqual(countdown_seconds(start + 300, start), 300)
+        self.assertEqual(countdown_seconds(start + 300, start + 59), 300)
+        self.assertEqual(countdown_seconds(start + 300, start + 60), 240)
+        self.assertEqual(countdown_seconds(start + 300, start + 299), 60)
+        self.assertEqual(countdown_seconds(start + 300, start + 300), 0)
 
     def test_wait(self) -> None:
         self.assertEqual(format_wait(30), "меньше минуты")

@@ -781,6 +781,22 @@ class Database:
             )
             await self.conn.commit()
 
+    async def pending_battlecups(self) -> list[Battlecup]:
+        async with self._lock:
+            cursor = await self.conn.execute(
+                """
+                SELECT id FROM battlecups
+                WHERE status = 'pending'
+                ORDER BY starts_at, id
+                """
+            )
+            cups: list[Battlecup] = []
+            for row in await cursor.fetchall():
+                cup = await self._battlecup(int(row["id"]))
+                if cup is not None:
+                    cups.append(cup)
+            return cups
+
     async def claim_due_battlecups(self, now: int) -> list[Battlecup]:
         async with self._lock:
             try:

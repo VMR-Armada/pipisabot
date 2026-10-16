@@ -20,7 +20,7 @@ from aiogram.types import (
     User,
 )
 
-from pipisa.battlecup import MAX_MINUTES, MIN_MINUTES, STAKE, join_keyboard
+from pipisa.battlecup import MAX_MINUTES, MIN_MINUTES, STAKE, announcement_text, join_keyboard
 from pipisa.db import Database, Entry, Standing
 from pipisa.stats_card import CardData, render_stats
 from pipisa.texts import (
@@ -29,7 +29,6 @@ from pipisa.texts import (
     PRIVATE_WELCOME,
     cooldown_message,
     display_name,
-    battlecup_announce,
     duel_challenge,
     duel_refusal,
     duel_result,
@@ -429,14 +428,8 @@ async def _refresh_battlecup(message: Message, db: Database, battlecup_id: int) 
     cup = await db.get_battlecup(battlecup_id)
     if cup is None or cup.status != "pending":
         return
-    names = [escape_name(player.first_name, player.username, player.user_id) for player in cup.players]
-    text = battlecup_announce(
-        starts_in=max(0, cup.starts_at - int(time.time())),
-        stake=cup.stake,
-        names=names,
-    )
     try:
-        await message.edit_text(text, reply_markup=join_keyboard(battlecup_id))
+        await message.edit_text(announcement_text(cup, int(time.time())), reply_markup=join_keyboard(battlecup_id))
     except TelegramBadRequest:
         logger.info("Не смог обновить набор баттлкапа %s", battlecup_id)
 
@@ -457,8 +450,12 @@ async def cmd_battlecup(message: Message, command: CommandObject, db: Database) 
     if battlecup_id is None:
         await message.reply("В этом чате уже есть баттлкап.")
         return
+    cup = await db.get_battlecup(battlecup_id)
+    if cup is None:
+        await message.reply("Не удалось открыть баттлкап.")
+        return
     sent = await message.reply(
-        battlecup_announce(starts_in=minutes * 60, stake=STAKE, names=[]),
+        announcement_text(cup, int(time.time())),
         reply_markup=join_keyboard(battlecup_id),
     )
     await db.set_battlecup_message(battlecup_id, sent.message_id)
