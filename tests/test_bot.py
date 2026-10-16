@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from io import BytesIO
 import tempfile
 import unittest
 from unittest.mock import patch
 from datetime import timezone
 from pathlib import Path
+
+from PIL import Image
 
 from pipisa.battlecup import countdown_seconds
 from pipisa.day import next_midnight
@@ -282,6 +285,15 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.diff, 4)
         self.assertEqual(outcome.challenger_size, 24)
         self.assertEqual(outcome.opponent_size, 11)
+        winner = await self.db.get_stats(1, -100)
+        loser = await self.db.get_stats(2, -100)
+        assert winner is not None and loser is not None
+        self.assertEqual(winner.duel_wins, 1)
+        self.assertEqual(winner.contests, [("duel", 4)])
+        self.assertEqual(winner.rivals, [("Борис", 1, 0, 0)])
+        self.assertEqual(loser.duel_losses, 1)
+        self.assertEqual(loser.contests, [("duel", -4)])
+        self.assertEqual(loser.rivals, [("Анна", 0, 1, 0)])
         self.assertIsNone(await self.db.apply_duel(duel_id, 6, 2))
 
         tie_id = await self.db.create_duel(chat_id=-100, challenger_id=2, opponent_id=1)
@@ -357,6 +369,15 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         assert anna is not None and boris is not None
         self.assertEqual(anna.size, 22)
         self.assertEqual(boris.size, 18)
+        winner = await self.db.get_stats(1, -100)
+        loser = await self.db.get_stats(2, -100)
+        assert winner is not None and loser is not None
+        self.assertEqual(winner.cup_wins, 1)
+        self.assertEqual(winner.cup_played, 1)
+        self.assertEqual(winner.contests[-1], ("battlecup", 2))
+        self.assertEqual(loser.cup_wins, 0)
+        self.assertEqual(loser.cup_played, 1)
+        self.assertEqual(loser.contests[-1], ("battlecup", -2))
 
         tied = await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=self.now)
         assert tied is not None
@@ -406,6 +427,29 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after.size, before.size + 2)
         self.assertIsNotNone(await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=self.now))
 
+    async def test_head_to_head_survives_old_contest_table(self) -> None:
+        await self.db.set_size(
+            user_id=1, chat_id=-100, username="ann", first_name="Анна", chat_title="Чат", size=20
+        )
+        await self.db.set_size(
+            user_id=2, chat_id=-100, username="boris", first_name="Борис", chat_title="Чат", size=15
+        )
+        duel_id = await self.db.create_duel(chat_id=-100, challenger_id=1, opponent_id=2)
+        assert duel_id is not None
+        self.assertTrue(await self.db.claim_duel(duel_id, 2))
+        await self.db.apply_duel(duel_id, 6, 2)
+        await self.db.conn.execute("ALTER TABLE contest_results DROP COLUMN opponent_id")
+        await self.db.conn.commit()
+        path = self.db.path
+        await self.db.close()
+        self.db = Database(path, grow_min=-5, grow_max=10, zone=self.zone, clock=lambda: self.now)
+        await self.db.connect()
+        winner = await self.db.get_stats(1, -100)
+        loser = await self.db.get_stats(2, -100)
+        assert winner is not None and loser is not None
+        self.assertEqual(winner.rivals, [("Борис", 1, 0, 0)])
+        self.assertEqual(loser.rivals, [("Анна", 0, 1, 0)])
+
 
 class CardTests(unittest.TestCase):
     def test_png(self) -> None:
@@ -422,10 +466,17 @@ class CardTests(unittest.TestCase):
                 next_free_at=1_700_003_600,
                 now=1_700_000_000,
                 deltas=[4, -2, 8, 0, -5, 10, 3, -1],
+                duel_wins=2,
+                duel_losses=1,
+                cup_wins=1,
+                cup_played=2,
+                contests=(("duel", 4), ("battlecup", -2), ("duel", 0)),
+                rivals=(("Борис", 2, 1, 0), ("Виктор", 0, 1, 1)),
             )
         )
         self.assertTrue(png.startswith(b"\x89PNG"))
         self.assertGreater(len(png), 5000)
+        self.assertGreater(Image.open(BytesIO(png)).height, 900)
 
     def test_cyrillic_glyphs(self) -> None:
         font = _font(40, bold=True)

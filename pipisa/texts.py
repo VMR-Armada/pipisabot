@@ -344,17 +344,35 @@ def stats_fallback(
     plays: int,
     best_gain: int,
     worst_loss: int,
+    duel_wins: int,
+    duel_losses: int,
+    duel_ties: int,
+    cup_wins: int,
+    cup_played: int,
+    rivals: list[tuple[str, int, int, int]],
     next_free_text: str,
 ) -> str:
     safe = html.escape(name)
     best = format_signed_cm(best_gain) if best_gain else "—"
     worst = format_signed_cm(worst_loss) if worst_loss else "—"
-    return (
-        f"📏 <b>{safe}</b>\n"
-        f"Сейчас: <b>{format_cm(size)}</b>\n"
-        f"Место в чате: {rank} из {total}\n"
-        f"Замеров: {plays}\n"
-        f"Лучший рост: {best}\n"
-        f"Худший замер: {worst}\n"
-        f"{next_free_text}"
-    )
+    duels = f"{duel_wins}–{duel_losses}" + (f"–{duel_ties}" if duel_ties else "")
+    cups = f"{cup_wins} из {cup_played}" if cup_played else "—"
+    lines = [
+        f"📏 <b>{safe}</b>",
+        f"Сейчас: <b>{format_cm(size)}</b>",
+        f"Место в чате: {rank} из {total}",
+        f"Замеров: {plays}",
+        f"Лучший рост: {best}",
+        f"Худший замер: {worst}",
+        f"Дуэли: {duels}",
+        f"Баттлкапы: {cups}",
+    ]
+    if rivals:
+        lines.append("Счёт с соперниками:")
+        for rival_name, wins, losses, ties in rivals[:8]:
+            score = f"{wins}–{losses}" + (f"–{ties}" if ties else "")
+            lines.append(f"• {html.escape(rival_name)} — {score}")
+        if len(rivals) > 8:
+            lines.append(f"и ещё {len(rivals) - 8}")
+    lines.append(next_free_text)
+    return "\n".join(lines)

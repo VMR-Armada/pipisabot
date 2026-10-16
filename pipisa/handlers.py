@@ -224,6 +224,13 @@ async def cmd_stats(message: Message, db: Database) -> None:
                 next_free_at=stats.next_free_at,
                 now=now,
                 deltas=stats.deltas,
+                duel_wins=stats.duel_wins,
+                duel_losses=stats.duel_losses,
+                duel_ties=stats.duel_ties,
+                cup_wins=stats.cup_wins,
+                cup_played=stats.cup_played,
+                contests=tuple(stats.contests),
+                rivals=tuple(stats.rivals),
             )
         )
     except Exception:
@@ -237,6 +244,12 @@ async def cmd_stats(message: Message, db: Database) -> None:
                 plays=stats.plays,
                 best_gain=stats.best_gain,
                 worst_loss=stats.worst_loss,
+                duel_wins=stats.duel_wins,
+                duel_losses=stats.duel_losses,
+                duel_ties=stats.duel_ties,
+                cup_wins=stats.cup_wins,
+                cup_played=stats.cup_played,
+                rivals=stats.rivals,
                 next_free_text=free_text,
             )
         )

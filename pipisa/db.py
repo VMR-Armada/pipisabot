@@ -113,6 +113,13 @@ class Stats:
     worst_loss: int
     next_free_at: int | None
     deltas: list[int]
+    contests: list[tuple[str, int]]
+    duel_wins: int
+    duel_losses: int
+    duel_ties: int
+    cup_wins: int
+    cup_played: int
+    rivals: list[tuple[str, int, int, int]]
     first_name: str
     username: str | None
     chat_title: str | None
@@ -203,6 +210,19 @@ class Database:
                 PRIMARY KEY (battlecup_id, user_id)
             );
 
+            CREATE TABLE IF NOT EXISTS contest_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                source_id INTEGER NOT NULL,
+                delta INTEGER NOT NULL,
+                place INTEGER NOT NULL,
+                played_at INTEGER NOT NULL,
+                opponent_id INTEGER,
+                UNIQUE(kind, source_id, user_id)
+            );
+
             CREATE TABLE IF NOT EXISTS imported (
                 chat_id INTEGER NOT NULL,
                 username TEXT NOT NULL DEFAULT '',
@@ -214,6 +234,8 @@ class Database:
             );
             """
         )
+        await self._ensure_contest_opponent()
+        await self._backfill_contests()
         await self._db.commit()
 
     async def close(self) -> None:
@@ -329,6 +351,8 @@ class Database:
             )
             deltas = [int(item["delta"]) for item in await cursor.fetchall()]
             deltas.reverse()
+            contests = await self._contest_rows(user_id, chat_id)
+            summary = _contest_summary(contests)
             last_played = await self._last_played_at(user_id, chat_id)
             now = self._clock()
             available_at = None if can_play(now, last_played, self.zone) else next_midnight(now, self.zone)
@@ -341,6 +365,13 @@ class Database:
                 worst_loss=int(row["worst_loss"]),
                 next_free_at=available_at,
                 deltas=deltas,
+                contests=[(kind, delta) for kind, delta, _place in contests[-6:]],
+                duel_wins=summary[0],
+                duel_losses=summary[1],
+                duel_ties=summary[2],
+                cup_wins=summary[3],
+                cup_played=summary[4],
+                rivals=await self._duel_rivals(user_id, chat_id),
                 first_name=row["first_name"],
                 username=row["username"],
                 chat_title=row["chat_title"],
@@ -509,6 +540,30 @@ class Database:
                     WHERE id = ? AND status = 'rolling'
                     """,
                     (challenger_roll, opponent_roll, duel_id),
+                )
+                if challenger_roll == opponent_roll:
+                    challenger_place, opponent_place = 0, 0
+                elif challenger_roll > opponent_roll:
+                    challenger_place, opponent_place = 1, 2
+                else:
+                    challenger_place, opponent_place = 2, 1
+                await self._record_contest(
+                    user_id=duel.challenger_id,
+                    chat_id=duel.chat_id,
+                    kind="duel",
+                    source_id=duel_id,
+                    delta=challenger_delta,
+                    place=challenger_place,
+                    opponent_id=duel.opponent_id,
+                )
+                await self._record_contest(
+                    user_id=duel.opponent_id,
+                    chat_id=duel.chat_id,
+                    kind="duel",
+                    source_id=duel_id,
+                    delta=opponent_delta,
+                    place=opponent_place,
+                    opponent_id=duel.challenger_id,
                 )
                 challenger = await self._get_row(duel.challenger_id, duel.chat_id)
                 opponent = await self._get_row(duel.opponent_id, duel.chat_id)
@@ -847,6 +902,7 @@ class Database:
                 best = max(rolls.values())
                 winners = [user_id for user_id, roll in rolls.items() if roll == best]
                 shares = prize_shares(cup.stake * len(player_ids), winners)
+                places = contest_places(rolls)
                 for user_id, roll in rolls.items():
                     await self.conn.execute(
                         """
@@ -856,7 +912,16 @@ class Database:
                         """,
                         (roll, battlecup_id, user_id),
                     )
-                    await self._add_size(cup.chat_id, user_id, shares.get(user_id, 0))
+                    prize = shares.get(user_id, 0)
+                    await self._add_size(cup.chat_id, user_id, prize)
+                    await self._record_contest(
+                        user_id=user_id,
+                        chat_id=cup.chat_id,
+                        kind="battlecup",
+                        source_id=battlecup_id,
+                        delta=prize - cup.stake,
+                        place=places[user_id],
+                    )
                 await self.conn.execute(
                     "UPDATE battlecups SET status = 'done' WHERE id = ? AND status = 'running'",
                     (battlecup_id,),
@@ -962,6 +1027,163 @@ class Database:
             """,
             (user_id, chat_id, username, first_name or "Игрок", chat_title, self._clock()),
         )
+
+    async def _ensure_contest_opponent(self) -> None:
+        cursor = await self.conn.execute("PRAGMA table_info(contest_results)")
+        columns = {row["name"] for row in await cursor.fetchall()}
+        if "opponent_id" not in columns:
+            await self.conn.execute("ALTER TABLE contest_results ADD COLUMN opponent_id INTEGER")
+
+    async def _duel_rivals(self, user_id: int, chat_id: int) -> list[tuple[str, int, int, int]]:
+        cursor = await self.conn.execute(
+            """
+            SELECT
+                c.opponent_id,
+                MAX(COALESCE(NULLIF(p.first_name, ''), 'Игрок')) AS name,
+                SUM(CASE WHEN c.place = 1 THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN c.place = 2 THEN 1 ELSE 0 END) AS losses,
+                SUM(CASE WHEN c.place = 0 THEN 1 ELSE 0 END) AS ties
+            FROM contest_results c
+            LEFT JOIN players p
+                ON p.user_id = c.opponent_id AND p.chat_id = c.chat_id
+            WHERE c.user_id = ? AND c.chat_id = ? AND c.kind = 'duel' AND c.opponent_id IS NOT NULL
+            GROUP BY c.opponent_id
+            ORDER BY COUNT(*) DESC, wins DESC, c.opponent_id
+            """,
+            (user_id, chat_id),
+        )
+        return [
+            (row["name"], int(row["wins"]), int(row["losses"]), int(row["ties"]))
+            for row in await cursor.fetchall()
+        ]
+
+    async def _contest_rows(self, user_id: int, chat_id: int) -> list[tuple[str, int, int]]:
+        cursor = await self.conn.execute(
+            """
+            SELECT kind, delta, place FROM contest_results
+            WHERE user_id = ? AND chat_id = ?
+            ORDER BY played_at, id
+            """,
+            (user_id, chat_id),
+        )
+        return [(row["kind"], int(row["delta"]), int(row["place"])) for row in await cursor.fetchall()]
+
+    async def _record_contest(
+        self,
+        *,
+        user_id: int,
+        chat_id: int,
+        kind: str,
+        source_id: int,
+        delta: int,
+        place: int,
+        played_at: int | None = None,
+        opponent_id: int | None = None,
+    ) -> None:
+        await self.conn.execute(
+            """
+            INSERT OR IGNORE INTO contest_results (
+                user_id, chat_id, kind, source_id, delta, place, played_at, opponent_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                chat_id,
+                kind,
+                source_id,
+                delta,
+                place,
+                played_at or self._clock(),
+                opponent_id,
+            ),
+        )
+
+    async def _backfill_contests(self) -> None:
+        cursor = await self.conn.execute(
+            """
+            SELECT id, chat_id, challenger_id, opponent_id, challenger_roll, opponent_roll, created_at
+            FROM duels
+            WHERE status = 'done' AND challenger_roll IS NOT NULL AND opponent_roll IS NOT NULL
+            """
+        )
+        for row in await cursor.fetchall():
+            challenger_roll = int(row["challenger_roll"])
+            opponent_roll = int(row["opponent_roll"])
+            diff = abs(challenger_roll - opponent_roll)
+            if challenger_roll == opponent_roll:
+                challenger_delta, opponent_delta = 0, 0
+                challenger_place, opponent_place = 0, 0
+            elif challenger_roll > opponent_roll:
+                challenger_delta, opponent_delta = diff, -diff
+                challenger_place, opponent_place = 1, 2
+            else:
+                challenger_delta, opponent_delta = -diff, diff
+                challenger_place, opponent_place = 2, 1
+            played_at = int(row["created_at"])
+            await self._record_contest(
+                user_id=int(row["challenger_id"]),
+                chat_id=int(row["chat_id"]),
+                kind="duel",
+                source_id=int(row["id"]),
+                delta=challenger_delta,
+                place=challenger_place,
+                played_at=played_at,
+                opponent_id=int(row["opponent_id"]),
+            )
+            await self._record_contest(
+                user_id=int(row["opponent_id"]),
+                chat_id=int(row["chat_id"]),
+                kind="duel",
+                source_id=int(row["id"]),
+                delta=opponent_delta,
+                place=opponent_place,
+                played_at=played_at,
+                opponent_id=int(row["challenger_id"]),
+            )
+        await self.conn.execute(
+            """
+            UPDATE contest_results
+            SET opponent_id = (
+                SELECT CASE
+                    WHEN contest_results.user_id = duels.challenger_id THEN duels.opponent_id
+                    ELSE duels.challenger_id
+                END
+                FROM duels
+                WHERE duels.id = contest_results.source_id
+            )
+            WHERE kind = 'duel' AND opponent_id IS NULL
+            """
+        )
+        cursor = await self.conn.execute(
+            """
+            SELECT id, chat_id, stake, created_at FROM battlecups WHERE status = 'done'
+            """
+        )
+        cups = await cursor.fetchall()
+        for cup in cups:
+            entries = await self.conn.execute(
+                "SELECT user_id, roll FROM battlecup_entries WHERE battlecup_id = ?",
+                (int(cup["id"]),),
+            )
+            rows = await entries.fetchall()
+            if not rows or any(item["roll"] is None for item in rows):
+                continue
+            rolls = {int(item["user_id"]): int(item["roll"]) for item in rows}
+            best = max(rolls.values())
+            winners = [user_id for user_id, roll in rolls.items() if roll == best]
+            shares = prize_shares(int(cup["stake"]) * len(rolls), winners)
+            places = contest_places(rolls)
+            for user_id, _roll in rolls.items():
+                await self._record_contest(
+                    user_id=user_id,
+                    chat_id=int(cup["chat_id"]),
+                    kind="battlecup",
+                    source_id=int(cup["id"]),
+                    delta=shares.get(user_id, 0) - int(cup["stake"]),
+                    place=places[user_id],
+                    played_at=int(cup["created_at"]),
+                )
 
     async def _last_played_at(self, user_id: int, chat_id: int) -> int | None:
         cursor = await self.conn.execute(
@@ -1146,6 +1368,27 @@ class Database:
         if row is None or row["size"] is None:
             return None
         return Standing(rank=int(row["rank"]), total=int(row["total"]), size=int(row["size"]))
+
+
+def contest_places(rolls: dict[int, int]) -> dict[int, int]:
+    return {user_id: 1 + sum(other > roll for other in rolls.values()) for user_id, roll in rolls.items()}
+
+
+def _contest_summary(rows: list[tuple[str, int, int]]) -> tuple[int, int, int, int, int]:
+    duel_wins = duel_losses = duel_ties = cup_wins = cup_played = 0
+    for kind, _delta, place in rows:
+        if kind == "duel":
+            if place == 1:
+                duel_wins += 1
+            elif place == 2:
+                duel_losses += 1
+            else:
+                duel_ties += 1
+        elif kind == "battlecup":
+            cup_played += 1
+            if place == 1:
+                cup_wins += 1
+    return duel_wins, duel_losses, duel_ties, cup_wins, cup_played
 
 
 def prize_shares(pool: int, winner_ids: list[int]) -> dict[int, int]:

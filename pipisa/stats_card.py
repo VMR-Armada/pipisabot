@@ -31,10 +31,17 @@ class CardData:
     next_free_at: int | None
     now: int
     deltas: list[int]
+    duel_wins: int = 0
+    duel_losses: int = 0
+    duel_ties: int = 0
+    cup_wins: int = 0
+    cup_played: int = 0
+    contests: tuple[tuple[str, int], ...] = ()
+    rivals: tuple[tuple[str, int, int, int], ...] = ()
 
 
 def render_stats(data: CardData) -> bytes:
-    image = Image.new("RGB", (1000, 700), BG)
+    image = Image.new("RGB", _card_size(data), BG)
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     decor = ImageDraw.Draw(overlay)
     decor.ellipse((760, -140, 1160, 260), fill=(255, 92, 138, 46))
@@ -84,6 +91,8 @@ def render_stats(data: CardData) -> bytes:
 
     draw.text((48, 468), "Последние замеры", font=text_font, fill=MUTED)
     _draw_bars(draw, data.deltas, text_font)
+    _draw_contests(draw, data, text_font, label_font, value_font)
+    _draw_rivals(draw, data, text_font)
 
     buffer = BytesIO()
     image.save(buffer, format="PNG")
@@ -114,6 +123,74 @@ def _draw_bars(draw: ImageDraw.ImageDraw, deltas: list[int], font: ImageFont.Ima
         radius = min(4, bar_w / 2, bar_h / 2)
         draw.rounded_rectangle(box, radius=radius, fill=color)
         x += bar_w + gap
+
+
+def _draw_contests(
+    draw: ImageDraw.ImageDraw,
+    data: CardData,
+    text_font: ImageFont.ImageFont,
+    label_font: ImageFont.ImageFont,
+    value_font: ImageFont.ImageFont,
+) -> None:
+    draw.text((48, 690), "Состязания", font=text_font, fill=MUTED)
+    duel = f"{data.duel_wins}–{data.duel_losses}"
+    if data.duel_ties:
+        duel += f"–{data.duel_ties}"
+    cup = f"{data.cup_wins} из {data.cup_played}" if data.cup_played else "—"
+    pills = [
+        ("Дуэли", duel, "победы–поражения" + ("–ничьи" if data.duel_ties else "")),
+        ("Баттлкапы", cup, "первые места"),
+    ]
+    gap = 16
+    pill_w = (1000 - 96 - gap) // 2
+    top = 732
+    for index, (label, value, note) in enumerate(pills):
+        left = 48 + index * (pill_w + gap)
+        draw.rounded_rectangle((left, top, left + pill_w, top + 92), radius=18, fill=PILL)
+        draw.text((left + 16, top + 12), label, font=label_font, fill=MUTED)
+        draw.text((left + 16, top + 34), value, font=value_font, fill=WHITE)
+        draw.text((left + 16, top + 68), note, font=label_font, fill=MUTED)
+    if not data.contests:
+        draw.text((48, 840), "Дуэлей и баттлкапов пока нет", font=text_font, fill=MUTED)
+        return
+    recent = []
+    for kind, delta in data.contests:
+        title = "дуэль" if kind == "duel" else "кубок"
+        recent.append(f"{title} {format_signed_cm(delta)}")
+    draw.text((48, 840), _truncate(draw, "   ".join(recent), text_font, 900), font=text_font, fill=WHITE)
+
+
+def _card_size(data: CardData) -> tuple[int, int]:
+    shown = min(5, len(data.rivals))
+    if shown == 0:
+        return 1000, 900
+    lines = shown + (1 if len(data.rivals) > 5 else 0)
+    return 1000, 900 + 28 + 34 * lines
+
+
+def _draw_rivals(draw: ImageDraw.ImageDraw, data: CardData, font: ImageFont.ImageFont) -> None:
+    if not data.rivals:
+        return
+    draw.text((48, 888), "Счёт с соперниками", font=font, fill=MUTED)
+    y = 926
+    for name, wins, losses, ties in data.rivals[:5]:
+        score = _duel_score(wins, losses, ties)
+        color = MINT if wins > losses else PINK if losses > wins else WHITE
+        score_width = draw.textlength(score, font=font)
+        label = _truncate(draw, name, font, 860 - int(score_width))
+        draw.text((48, y), label, font=font, fill=WHITE)
+        draw.text((952 - score_width, y), score, font=font, fill=color)
+        y += 34
+    rest = len(data.rivals) - 5
+    if rest > 0:
+        draw.text((48, y), f"и ещё {rest}", font=font, fill=MUTED)
+
+
+def _duel_score(wins: int, losses: int, ties: int) -> str:
+    score = f"{wins}–{losses}"
+    if ties:
+        score += f"–{ties}"
+    return score
 
 
 _FONT_DIR = Path(__file__).resolve().parent / "fonts"
