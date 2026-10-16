@@ -359,23 +359,38 @@ async def cmd_duel(message: Message, command: CommandObject, db: Database) -> No
     if challenger is None:
         await message.reply("Сначала сделай /dick, чтобы было что ставить на дуэль.")
         return
-    username = _duel_username(command.args)
-    if username is None:
-        await message.reply("Напиши ник соперника: /duel @nickname")
-        return
-    if challenger_username and username.lower() == challenger_username.lower():
-        await message.reply("Себе вызвать нельзя.")
-        return
-    opponent = await db.find_player_by_username(message.chat.id, username)
-    if opponent is None:
-        await message.reply(
-            f"Не знаю @{html.escape(username)} в этом чате. "
-            "Соперник должен хотя бы раз сделать /dick."
-        )
-        return
-    if opponent.user_id == challenger_id:
-        await message.reply("Себе вызвать нельзя.")
-        return
+    target = _target_user(message)
+    if target is not None:
+        if target.id == challenger_id:
+            await message.reply("Себе вызвать нельзя.")
+            return
+        opponent = await db.find_player(target.id, message.chat.id)
+        if opponent is None:
+            name = escape_name(target.first_name, target.username, target.id)
+            await message.reply(
+                f"Не знаю {name} в этом чате. Соперник должен хотя бы раз сделать /dick."
+            )
+            return
+    else:
+        username = _duel_username(command.args)
+        if username is None:
+            await message.reply(
+                "Ответь командой /duel на сообщение соперника или напиши ник: /duel @nickname"
+            )
+            return
+        if challenger_username and username.lower() == challenger_username.lower():
+            await message.reply("Себе вызвать нельзя.")
+            return
+        opponent = await db.find_player_by_username(message.chat.id, username)
+        if opponent is None:
+            await message.reply(
+                f"Не знаю @{html.escape(username)} в этом чате. "
+                "Соперник должен хотя бы раз сделать /dick."
+            )
+            return
+        if opponent.user_id == challenger_id:
+            await message.reply("Себе вызвать нельзя.")
+            return
     duel_id = await db.create_duel(
         chat_id=message.chat.id,
         challenger_id=challenger_id,

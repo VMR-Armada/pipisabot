@@ -19,7 +19,7 @@ GROUP_COMMANDS = [
     BotCommand(command="top_dick", description="Топ 10 этого чата"),
     BotCommand(command="global_top", description="Глобальный топ 10"),
     BotCommand(command="stats", description="Статистика картинкой"),
-    BotCommand(command="duel", description="Вызвать на дуэль по нику"),
+    BotCommand(command="duel", description="Вызвать ответом или по нику"),
     BotCommand(command="import", description="Перенести известные размеры"),
     BotCommand(command="set", description="Задать размер ответом на сообщение"),
     BotCommand(command="help", description="Как играть"),
