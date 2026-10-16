@@ -250,6 +250,26 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(anna.size, 24)
         self.assertEqual(boris.size, 11)
 
+        cancel_id = await self.db.create_duel(chat_id=-100, challenger_id=1, opponent_id=2)
+        assert cancel_id is not None
+        open_duel = await self.db.find_open_duel(-100, 2, 1)
+        assert open_duel is not None
+        self.assertEqual(open_duel.id, cancel_id)
+        self.assertFalse(await self.db.cancel_duel(cancel_id, 2))
+        self.assertTrue(await self.db.cancel_duel(cancel_id, 1))
+        self.assertFalse(await self.db.cancel_duel(cancel_id, 1))
+        self.assertFalse(await self.db.claim_duel(cancel_id, 2))
+        self.assertIsNone(await self.db.find_open_duel(-100, 1, 2))
+        replacement = await self.db.create_duel(chat_id=-100, challenger_id=1, opponent_id=2)
+        assert replacement is not None
+        self.assertTrue(await self.db.claim_duel(replacement, 2))
+        self.assertFalse(await self.db.cancel_duel(replacement, 1))
+        anna = await self.db.find_player(1, -100)
+        boris = await self.db.find_player(2, -100)
+        assert anna is not None and boris is not None
+        self.assertEqual(anna.size, 24)
+        self.assertEqual(boris.size, 11)
+
 
 class CardTests(unittest.TestCase):
     def test_png(self) -> None:

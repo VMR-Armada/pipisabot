@@ -347,6 +347,25 @@ class Database:
                 await self.conn.rollback()
                 raise
 
+    async def find_open_duel(self, chat_id: int, user_a: int, user_b: int) -> Duel | None:
+        async with self._lock:
+            cursor = await self.conn.execute(
+                """
+                SELECT id FROM duels
+                WHERE chat_id = ? AND status IN ('pending', 'rolling')
+                  AND (
+                    (challenger_id = ? AND opponent_id = ?)
+                    OR (challenger_id = ? AND opponent_id = ?)
+                  )
+                LIMIT 1
+                """,
+                (chat_id, user_a, user_b, user_b, user_a),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+            return await self._duel(int(row["id"]))
+
     async def get_duel(self, duel_id: int) -> Duel | None:
         async with self._lock:
             return await self._duel(duel_id)
@@ -375,6 +394,23 @@ class Database:
                 (duel_id,),
             )
             await self.conn.commit()
+
+    async def cancel_duel(self, duel_id: int, user_id: int) -> bool:
+        async with self._lock:
+            try:
+                cursor = await self.conn.execute(
+                    """
+                    UPDATE duels
+                    SET status = 'cancelled'
+                    WHERE id = ? AND challenger_id = ? AND status = 'pending'
+                    """,
+                    (duel_id, user_id),
+                )
+                await self.conn.commit()
+                return cursor.rowcount == 1
+            except Exception:
+                await self.conn.rollback()
+                raise
 
     async def decline_duel(self, duel_id: int, user_id: int) -> bool:
         async with self._lock:
