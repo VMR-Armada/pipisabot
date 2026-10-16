@@ -23,8 +23,6 @@ GROUP_COMMANDS = [
     BotCommand(command="stats", description="Статистика картинкой"),
     BotCommand(command="duel", description="Вызвать ответом или по нику"),
     BotCommand(command="battlecup", description="Турнир на боулинге, взнос 2 см"),
-    BotCommand(command="import", description="Перенести известные размеры"),
-    BotCommand(command="set", description="Задать размер ответом на сообщение"),
     BotCommand(command="help", description="Как играть"),
 ]
 

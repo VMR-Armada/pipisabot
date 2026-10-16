@@ -24,10 +24,8 @@ from pipisa.battlecup import MAX_MINUTES, MIN_MINUTES, STAKE, join_keyboard
 from pipisa.db import Database, Entry, Standing
 from pipisa.stats_card import CardData, render_stats
 from pipisa.texts import (
-    ADMIN_ONLY,
     GROUP_ONLY,
     HELP_TEXT,
-    IMPORT_USAGE,
     PRIVATE_WELCOME,
     cooldown_message,
     display_name,
@@ -36,14 +34,11 @@ from pipisa.texts import (
     duel_refusal,
     duel_result,
     escape_name,
-    format_cm,
     format_wait,
     grow_message,
-    plural,
     stats_fallback,
     top_message,
 )
-from pipisa.transfer import ImportItem, command_body, parse_import_text, parse_size
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -88,16 +83,6 @@ def _standing(standing: Standing | None) -> tuple[int, int, int] | None:
     return standing.rank, standing.total, standing.size
 
 
-async def _is_admin(message: Message, bot: Bot) -> bool:
-    if message.from_user is None:
-        return False
-    try:
-        member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-    except TelegramBadRequest:
-        return False
-    return member.status in {ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR}
-
-
 async def _claim(message: Message, db: Database) -> None:
     if message.from_user is None:
         return
@@ -109,47 +94,6 @@ async def _claim(message: Message, db: Database) -> None:
         first_name=first_name,
         chat_title=message.chat.title,
     )
-
-
-def _import_source(message: Message) -> str:
-    own = command_body(message.text or "")
-    if own:
-        return own
-    reply = message.reply_to_message
-    if reply is not None and reply.text:
-        return reply.text
-    return ""
-
-
-def _import_report(applied: list[ImportItem], pending: list[ImportItem], broken: list[str]) -> str:
-    lines = [f"Записал {_count(len(applied) + len(pending), 'размер', 'размера', 'размеров')}."]
-    if applied:
-        lines.append("")
-        lines.append("Уже привязаны к игрокам в этом чате:")
-        lines.extend(_import_line(item) for item in applied)
-    if pending:
-        lines.append("")
-        lines.append("В топе уже видны и привяжутся, когда человек напишет команду:")
-        lines.extend(_import_line(item) for item in pending)
-    if broken:
-        lines.append("")
-        lines.append("Эти строки не разобрал:")
-        lines.extend(f"• {html.escape(line)}" for line in broken[:10])
-    lines.append("")
-    lines.append("Следующий /dick прибавит новый замер к записанному размеру.")
-    return "\n".join(lines)
-
-
-def _import_line(item: ImportItem) -> str:
-    if item.username:
-        label = f"{item.first_name} (@{item.username})"
-    else:
-        label = item.first_name
-    return f"• {html.escape(label)} — {format_cm(item.size)}"
-
-
-def _count(value: int, one: str, few: str, many: str) -> str:
-    return f"{value} {plural(value, one, few, many)}"
 
 
 def _target_user(message: Message) -> User | None:
@@ -302,32 +246,6 @@ async def cmd_stats(message: Message, db: Database) -> None:
         BufferedInputFile(png, filename="stats.png"),
         caption=free_text,
     )
-
-
-@router.message(Command("import"))
-async def cmd_import(message: Message, db: Database, bot: Bot) -> None:
-    if message.from_user is None or message.from_user.is_bot:
-        return
-    if not _is_group(message):
-        await message.answer(GROUP_ONLY)
-        return
-    if not await _is_admin(message, bot):
-        await message.reply(ADMIN_ONLY)
-        return
-    source = _import_source(message)
-    if not source:
-        await message.reply(IMPORT_USAGE)
-        return
-    items, broken = parse_import_text(source)
-    if not items:
-        await message.reply("В списке не нашёл ни одного размера.\n\n" + IMPORT_USAGE)
-        return
-    applied, pending = await db.import_sizes(
-        chat_id=message.chat.id,
-        chat_title=message.chat.title,
-        items=items,
-    )
-    await message.reply(_import_report(applied, pending, broken))
 
 
 _NICK = re.compile(r"^@?([A-Za-z0-9_]{4,})$")
@@ -570,36 +488,6 @@ async def cb_battlecup_join(query: CallbackQuery, db: Database) -> None:
         return
     await query.answer("Взнос принят.")
     await _refresh_battlecup(query.message, db, battlecup_id)
-
-
-@router.message(Command("set"))
-async def cmd_set(message: Message, command: CommandObject, db: Database, bot: Bot) -> None:
-    if message.from_user is None or message.from_user.is_bot:
-        return
-    if not _is_group(message):
-        await message.answer(GROUP_ONLY)
-        return
-    if not await _is_admin(message, bot):
-        await message.reply(ADMIN_ONLY)
-        return
-    size = parse_size(command.args or "")
-    target = _target_user(message)
-    if size is None or target is None:
-        await message.reply("Ответь этой командой на сообщение игрока и укажи размер, например /set 120.")
-        return
-    await db.set_size(
-        user_id=target.id,
-        chat_id=message.chat.id,
-        username=target.username,
-        first_name=target.first_name or "Игрок",
-        chat_title=message.chat.title,
-        size=size,
-    )
-    name = escape_name(target.first_name, target.username, target.id)
-    await message.reply(
-        f"Текущий размер {name}: <b>{format_cm(size)}</b>.\n"
-        "Следующий /dick пойдёт уже от этого числа."
-    )
 
 
 @router.my_chat_member()
