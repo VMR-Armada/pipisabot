@@ -52,6 +52,41 @@ class DuelOutcome:
 
 
 @dataclass
+class BattlecupPlayer:
+    user_id: int
+    first_name: str
+    username: str | None
+    roll: int | None
+
+
+@dataclass
+class Battlecup:
+    id: int
+    chat_id: int
+    status: str
+    stake: int
+    starts_at: int
+    message_id: int | None
+    players: list[BattlecupPlayer]
+
+
+@dataclass
+class BattlecupPayout:
+    user_id: int
+    first_name: str
+    username: str | None
+    roll: int
+    prize: int
+    size: int
+
+
+@dataclass
+class BattlecupOutcome:
+    pool: int
+    payouts: list[BattlecupPayout]
+
+
+@dataclass
 class Entry:
     user_id: int
     chat_id: int
@@ -148,6 +183,24 @@ class Database:
                 challenger_roll INTEGER,
                 opponent_roll INTEGER,
                 created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS battlecups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                stake INTEGER NOT NULL,
+                starts_at INTEGER NOT NULL,
+                message_id INTEGER,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS battlecup_entries (
+                battlecup_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                roll INTEGER,
+                joined_at INTEGER NOT NULL,
+                PRIMARY KEY (battlecup_id, user_id)
             );
 
             CREATE TABLE IF NOT EXISTS imported (
@@ -649,6 +702,227 @@ class Database:
             standing = await self._global_standing(user_id, chat_id)
             return entries, standing
 
+    async def create_battlecup(self, *, chat_id: int, stake: int, starts_at: int) -> int | None:
+        async with self._lock:
+            try:
+                cursor = await self.conn.execute(
+                    """
+                    SELECT id FROM battlecups
+                    WHERE chat_id = ? AND status IN ('pending', 'running')
+                    LIMIT 1
+                    """,
+                    (chat_id,),
+                )
+                if await cursor.fetchone() is not None:
+                    await self.conn.commit()
+                    return None
+                cursor = await self.conn.execute(
+                    """
+                    INSERT INTO battlecups (chat_id, status, stake, starts_at, created_at)
+                    VALUES (?, 'pending', ?, ?, ?)
+                    """,
+                    (chat_id, stake, starts_at, self._clock()),
+                )
+                await self.conn.commit()
+                return int(cursor.lastrowid)
+            except Exception:
+                await self.conn.rollback()
+                raise
+
+    async def set_battlecup_message(self, battlecup_id: int, message_id: int) -> None:
+        async with self._lock:
+            await self.conn.execute(
+                "UPDATE battlecups SET message_id = ? WHERE id = ?",
+                (message_id, battlecup_id),
+            )
+            await self.conn.commit()
+
+    async def get_battlecup(self, battlecup_id: int) -> Battlecup | None:
+        async with self._lock:
+            return await self._battlecup(battlecup_id)
+
+    async def join_battlecup(self, battlecup_id: int, user_id: int) -> str:
+        async with self._lock:
+            try:
+                cup = await self._battlecup(battlecup_id)
+                if cup is None or cup.status != "pending":
+                    await self.conn.commit()
+                    return "closed"
+                if any(player.user_id == user_id for player in cup.players):
+                    await self.conn.commit()
+                    return "already"
+                row = await self._get_row(user_id, cup.chat_id)
+                if row is None or int(row["plays"]) <= 0:
+                    await self.conn.commit()
+                    return "unknown"
+                await self.conn.execute(
+                    """
+                    INSERT INTO battlecup_entries (battlecup_id, user_id, joined_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (battlecup_id, user_id, self._clock()),
+                )
+                await self._add_size(cup.chat_id, user_id, -cup.stake)
+                await self.conn.commit()
+                return "joined"
+            except Exception:
+                await self.conn.rollback()
+                raise
+
+    async def requeue_running_battlecups(self, now: int) -> None:
+        async with self._lock:
+            await self.conn.execute(
+                """
+                UPDATE battlecups
+                SET status = 'pending', starts_at = ?
+                WHERE status = 'running'
+                """,
+                (now,),
+            )
+            await self.conn.commit()
+
+    async def claim_due_battlecups(self, now: int) -> list[Battlecup]:
+        async with self._lock:
+            try:
+                cursor = await self.conn.execute(
+                    """
+                    SELECT id FROM battlecups
+                    WHERE status = 'pending' AND starts_at <= ?
+                    ORDER BY starts_at, id
+                    """,
+                    (now,),
+                )
+                ids = [int(row["id"]) for row in await cursor.fetchall()]
+                claimed: list[Battlecup] = []
+                for battlecup_id in ids:
+                    cursor = await self.conn.execute(
+                        """
+                        UPDATE battlecups
+                        SET status = 'running'
+                        WHERE id = ? AND status = 'pending'
+                        """,
+                        (battlecup_id,),
+                    )
+                    if cursor.rowcount != 1:
+                        continue
+                    cup = await self._battlecup(battlecup_id)
+                    if cup is not None:
+                        claimed.append(cup)
+                await self.conn.commit()
+                return claimed
+            except Exception:
+                await self.conn.rollback()
+                raise
+
+    async def finish_battlecup(self, battlecup_id: int, rolls: dict[int, int]) -> BattlecupOutcome | None:
+        for roll in rolls.values():
+            if not 1 <= roll <= 6:
+                raise ValueError("В боулинге может выпасть только число от 1 до 6")
+        async with self._lock:
+            try:
+                cup = await self._battlecup(battlecup_id)
+                if cup is None or cup.status != "running":
+                    await self.conn.commit()
+                    return None
+                player_ids = [player.user_id for player in cup.players]
+                if set(rolls) != set(player_ids) or not player_ids:
+                    await self.conn.rollback()
+                    raise ValueError("Броски не сходятся с участниками")
+                best = max(rolls.values())
+                winners = [user_id for user_id, roll in rolls.items() if roll == best]
+                shares = prize_shares(cup.stake * len(player_ids), winners)
+                for user_id, roll in rolls.items():
+                    await self.conn.execute(
+                        """
+                        UPDATE battlecup_entries
+                        SET roll = ?
+                        WHERE battlecup_id = ? AND user_id = ?
+                        """,
+                        (roll, battlecup_id, user_id),
+                    )
+                    await self._add_size(cup.chat_id, user_id, shares.get(user_id, 0))
+                await self.conn.execute(
+                    "UPDATE battlecups SET status = 'done' WHERE id = ? AND status = 'running'",
+                    (battlecup_id,),
+                )
+                payouts: list[BattlecupPayout] = []
+                for player in cup.players:
+                    row = await self._get_row(player.user_id, cup.chat_id)
+                    if row is None:
+                        continue
+                    payouts.append(
+                        BattlecupPayout(
+                            user_id=player.user_id,
+                            first_name=player.first_name,
+                            username=player.username,
+                            roll=rolls[player.user_id],
+                            prize=shares.get(player.user_id, 0),
+                            size=int(row["size"]),
+                        )
+                    )
+                await self.conn.commit()
+                return BattlecupOutcome(pool=cup.stake * len(player_ids), payouts=payouts)
+            except Exception:
+                await self.conn.rollback()
+                raise
+
+    async def refund_battlecup(self, battlecup_id: int) -> Battlecup | None:
+        async with self._lock:
+            try:
+                cup = await self._battlecup(battlecup_id)
+                if cup is None or cup.status not in {"pending", "running"}:
+                    await self.conn.commit()
+                    return None
+                for player in cup.players:
+                    await self._add_size(cup.chat_id, player.user_id, cup.stake)
+                await self.conn.execute(
+                    """
+                    UPDATE battlecups
+                    SET status = 'cancelled'
+                    WHERE id = ? AND status IN ('pending', 'running')
+                    """,
+                    (battlecup_id,),
+                )
+                await self.conn.commit()
+                return cup
+            except Exception:
+                await self.conn.rollback()
+                raise
+
+    async def _battlecup(self, battlecup_id: int) -> Battlecup | None:
+        cursor = await self.conn.execute("SELECT * FROM battlecups WHERE id = ?", (battlecup_id,))
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        cursor = await self.conn.execute(
+            """
+            SELECT e.user_id, e.roll, p.first_name, p.username
+            FROM battlecup_entries e
+            JOIN players p ON p.user_id = e.user_id AND p.chat_id = ?
+            WHERE e.battlecup_id = ?
+            ORDER BY e.joined_at, e.user_id
+            """,
+            (int(row["chat_id"]), battlecup_id),
+        )
+        players = [
+            BattlecupPlayer(
+                user_id=int(item["user_id"]),
+                first_name=item["first_name"],
+                username=item["username"],
+                roll=None if item["roll"] is None else int(item["roll"]),
+            )
+            for item in await cursor.fetchall()
+        ]
+        return Battlecup(
+            id=int(row["id"]),
+            chat_id=int(row["chat_id"]),
+            status=row["status"],
+            stake=int(row["stake"]),
+            starts_at=int(row["starts_at"]),
+            message_id=None if row["message_id"] is None else int(row["message_id"]),
+            players=players,
+        )
+
     async def _upsert_player(
         self,
         *,
@@ -856,6 +1130,14 @@ class Database:
         if row is None or row["size"] is None:
             return None
         return Standing(rank=int(row["rank"]), total=int(row["total"]), size=int(row["size"]))
+
+
+def prize_shares(pool: int, winner_ids: list[int]) -> dict[int, int]:
+    if pool < 0 or not winner_ids:
+        raise ValueError("Нечего делить")
+    ordered = sorted(winner_ids)
+    share, extra = divmod(pool, len(ordered))
+    return {user_id: share + (1 if index < extra else 0) for index, user_id in enumerate(ordered)}
 
 
 def _name_key(name: str) -> str:

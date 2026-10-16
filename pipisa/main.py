@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import sys
 
@@ -10,6 +11,7 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.types import BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats
 
+from pipisa.battlecup import watch_battlecups
 from pipisa.config import Config
 from pipisa.db import Database
 from pipisa.handlers import router
@@ -20,6 +22,7 @@ GROUP_COMMANDS = [
     BotCommand(command="global_top", description="Глобальный топ 10"),
     BotCommand(command="stats", description="Статистика картинкой"),
     BotCommand(command="duel", description="Вызвать ответом или по нику"),
+    BotCommand(command="battlecup", description="Турнир на боулинге, взнос 2 см"),
     BotCommand(command="import", description="Перенести известные размеры"),
     BotCommand(command="set", description="Задать размер ответом на сообщение"),
     BotCommand(command="help", description="Как играть"),
@@ -55,6 +58,7 @@ async def run(config: Config) -> None:
     )
     dp = Dispatcher(db=db)
     dp.include_router(router)
+    watch = asyncio.create_task(watch_battlecups(bot, db))
     try:
         await _setup_bot(bot)
         await dp.start_polling(
@@ -63,6 +67,9 @@ async def run(config: Config) -> None:
             drop_pending_updates=True,
         )
     finally:
+        watch.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watch
         await db.close()
 
 

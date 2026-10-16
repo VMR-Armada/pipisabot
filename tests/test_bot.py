@@ -8,10 +8,10 @@ from pathlib import Path
 
 from pipisa.day import next_midnight
 
-from pipisa.db import Database, Entry
+from pipisa.db import BattlecupOutcome, BattlecupPayout, Database, Entry, prize_shares
 from pipisa.handlers import _rows
 from pipisa.stats_card import CardData, _font, render_stats
-from pipisa.texts import duel_refusal, format_wait, plural, top_message
+from pipisa.texts import battlecup_result, duel_refusal, format_wait, plural, top_message
 from pipisa.transfer import ImportItem, parse_import_text, parse_size
 
 
@@ -50,6 +50,26 @@ class TextTests(unittest.TestCase):
             declined = duel_refusal("Борис", challenger=False)
         self.assertEqual(backed_out, "Анна отказался от дуэли.\nВызвал и сразу передумал. Впечатляет.")
         self.assertEqual(declined, "Борис отказался от дуэли.\nКубик даже не понадобился.")
+
+    def test_prize_shares_keep_the_whole_pool(self) -> None:
+        shares = prize_shares(10, [3, 1, 2])
+        self.assertEqual(shares, {1: 4, 2: 3, 3: 3})
+        self.assertEqual(sum(shares.values()), 10)
+
+    def test_battlecup_result_flatters_the_winner_and_last_place(self) -> None:
+        outcome = BattlecupOutcome(
+            pool=6,
+            payouts=[
+                BattlecupPayout(1, "Анна", None, 6, 6, 24),
+                BattlecupPayout(2, "Борис", None, 3, 0, 18),
+                BattlecupPayout(3, "Вова", None, 1, 0, 16),
+            ],
+        )
+        with patch("pipisa.texts.random.choice", side_effect=lambda pool: pool[0]):
+            text = battlecup_result(outcome)
+        self.assertIn("Анна, кегли сегодня были на твоей стороне.", text)
+        self.assertIn("Вова, шар увидел кегли и сделал вид, что их нет.", text)
+        self.assertNotIn("Борис, шар", text)
 
     def test_wait(self) -> None:
         self.assertEqual(format_wait(30), "меньше минуты")
@@ -283,6 +303,99 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         assert anna is not None and boris is not None
         self.assertEqual(anna.size, 24)
         self.assertEqual(boris.size, 11)
+
+    async def test_battlecup_pays_the_pool(self) -> None:
+        for user_id, username, first_name, size in (
+            (1, "anna", "Анна", 20),
+            (2, "boris", "Борис", 20),
+            (3, "vova", "Вова", 20),
+        ):
+            await self.db.set_size(
+                user_id=user_id,
+                chat_id=-100,
+                username=username,
+                first_name=first_name,
+                chat_title="Чат",
+                size=size,
+            )
+
+        future = await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=self.now + 300)
+        assert future is not None
+        self.assertEqual(await self.db.claim_due_battlecups(self.now), [])
+        self.assertIsNone(await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=self.now))
+
+        self.assertEqual(await self.db.join_battlecup(future, 1), "joined")
+        self.assertEqual(await self.db.join_battlecup(future, 1), "already")
+        self.assertEqual(await self.db.join_battlecup(future, 9), "unknown")
+        anna = await self.db.find_player(1, -100)
+        assert anna is not None
+        self.assertEqual(anna.size, 18)
+
+        self.assertEqual(await self.db.join_battlecup(future, 2), "joined")
+        claimed = await self.db.claim_due_battlecups(self.now + 300)
+        self.assertEqual([cup.id for cup in claimed], [future])
+        self.assertEqual(await self.db.join_battlecup(future, 3), "closed")
+        boris = await self.db.find_player(2, -100)
+        assert boris is not None
+        self.assertEqual(boris.size, 18)
+
+        outcome = await self.db.finish_battlecup(future, {1: 6, 2: 2})
+        assert outcome is not None
+        self.assertEqual(outcome.pool, 4)
+        self.assertIsNone(await self.db.finish_battlecup(future, {1: 6, 2: 2}))
+        anna = await self.db.find_player(1, -100)
+        boris = await self.db.find_player(2, -100)
+        assert anna is not None and boris is not None
+        self.assertEqual(anna.size, 22)
+        self.assertEqual(boris.size, 18)
+
+        tied = await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=self.now)
+        assert tied is not None
+        self.assertEqual(await self.db.join_battlecup(tied, 1), "joined")
+        self.assertEqual(await self.db.join_battlecup(tied, 2), "joined")
+        self.assertEqual(len(await self.db.claim_due_battlecups(self.now)), 1)
+        tied_outcome = await self.db.finish_battlecup(tied, {1: 4, 2: 4})
+        assert tied_outcome is not None
+        self.assertEqual(sorted(item.prize for item in tied_outcome.payouts), [2, 2])
+        anna = await self.db.find_player(1, -100)
+        boris = await self.db.find_player(2, -100)
+        assert anna is not None and boris is not None
+        self.assertEqual(anna.size, 22)
+        self.assertEqual(boris.size, 18)
+
+        split = await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=self.now)
+        assert split is not None
+        for user_id in (1, 2, 3):
+            self.assertEqual(await self.db.join_battlecup(split, user_id), "joined")
+        self.assertEqual(len(await self.db.claim_due_battlecups(self.now)), 1)
+        split_outcome = await self.db.finish_battlecup(split, {1: 5, 2: 5, 3: 5})
+        assert split_outcome is not None
+        self.assertEqual({item.user_id: item.prize for item in split_outcome.payouts}, {1: 2, 2: 2, 3: 2})
+
+        odd = await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=self.now)
+        assert odd is not None
+        for user_id in (1, 2, 3):
+            self.assertEqual(await self.db.join_battlecup(odd, user_id), "joined")
+        self.assertEqual(len(await self.db.claim_due_battlecups(self.now)), 1)
+        odd_outcome = await self.db.finish_battlecup(odd, {1: 3, 2: 6, 3: 6})
+        assert odd_outcome is not None
+        prizes = {item.user_id: item.prize for item in odd_outcome.payouts}
+        self.assertEqual(prizes, {1: 0, 2: 3, 3: 3})
+        self.assertEqual(sum(prizes.values()), 6)
+
+        short = await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=self.now)
+        assert short is not None
+        self.assertEqual(await self.db.join_battlecup(short, 1), "joined")
+        before = await self.db.find_player(1, -100)
+        assert before is not None
+        self.assertEqual(len(await self.db.claim_due_battlecups(self.now)), 1)
+        refunded = await self.db.refund_battlecup(short)
+        assert refunded is not None
+        self.assertIsNone(await self.db.refund_battlecup(short))
+        after = await self.db.find_player(1, -100)
+        assert after is not None
+        self.assertEqual(after.size, before.size + 2)
+        self.assertIsNotNone(await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=self.now))
 
 
 class CardTests(unittest.TestCase):

@@ -5,7 +5,7 @@ import random
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pipisa.db import DuelOutcome
+    from pipisa.db import BattlecupOutcome, DuelOutcome
 
 HELP_TEXT = (
     "Я линейка — шуточная игра для групповых чатов.\n\n"
@@ -17,6 +17,7 @@ HELP_TEXT = (
     "/global_top — топ 10 по всем чатам. Размер из этого чата, если человек здесь играет\n"
     "/stats — карточка статистики\n"
     "/duel — дуэль на кубиках: ответом на сообщение или через /duel @ник. Вызов можно отменить, пока его не приняли\n"
+    "/battlecup 5 — турнир через 5 минут. Кнопка «Присоединиться» ставит 2 см, победителя выбирает боулинг\n"
     "/help — эта справка\n\n"
     "Админ чата может перенести уже известные размеры:\n"
     "/import — списком, каждая строка как @ник 120\n"
@@ -175,6 +176,105 @@ def duel_refusal(name: str, *, challenger: bool) -> str:
             "Смелости хватило ровно на отказ.",
         )
     return f"{name} отказался от дуэли.\n{random.choice(pool)}"
+
+
+def battlecup_announce(*, starts_in: int, stake: int, names: list[str]) -> str:
+    pool = stake * len(names)
+    lines = [
+        "🏆 <b>Баттлкап</b>",
+        f"Старт через {format_wait(starts_in)}.",
+        f"Взнос <b>{format_cm(stake)}</b>. Сейчас в банке <b>{format_cm(pool)}</b>.",
+        "Каждый бросает шар для боулинга. У кого результат выше, тот забирает банк. "
+        "Если первых мест несколько, банк делится поровну.",
+    ]
+    if names:
+        lines.append("")
+        lines.append("Уже в игре:")
+        lines.extend(f"• {name}" for name in names)
+    else:
+        lines.append("Пока никто не поставил. Нужны двое.")
+    return "\n".join(lines)
+
+
+def bowling_score(value: int) -> str:
+    if value == 6:
+        return "страйк"
+    if value == 1:
+        return "мимо"
+    return str(value)
+
+
+def _winner_compliment(names: list[str]) -> str:
+    if len(names) == 1:
+        name = names[0]
+        pool = (
+            f"{name}, кегли сегодня были на твоей стороне.",
+            f"{name} забирает банк так, будто иначе и быть не могло.",
+            f"Красивый бросок, {name}.",
+            f"{name}, дорожка сегодня работала на тебя.",
+            f"Банк нашёл, кого хотел: {name}.",
+        )
+    else:
+        listed = ", ".join(names)
+        pool = (
+            f"{listed} делят первое место. Дорожка не смогла выбрать одного.",
+            f"Банк на нескольких руках: {listed}. Справедливо и немного обидно.",
+            f"{listed}, бросок один на всех. Славу тоже делите.",
+        )
+    return random.choice(pool)
+
+
+def _last_place_taunt(names: list[str]) -> str:
+    if len(names) == 1:
+        name = names[0]
+        pool = (
+            f"{name}, шар увидел кегли и сделал вид, что их нет.",
+            f"Последнее место у {name}. Взнос ушёл на чужой праздник.",
+            f"{name} сегодня спонсор победителя.",
+            f"Кегли бросок {name} даже не заметили.",
+            f"{name} закрывает таблицу. Снизу.",
+        )
+    else:
+        listed = ", ".join(names)
+        pool = (
+            f"Последнее место делят {listed}. Редкая командная работа.",
+            f"{listed} внизу таблицы. Шар сегодня был не в настроении.",
+            f"{listed} оплатили чужое первое место. Щедро.",
+        )
+    return random.choice(pool)
+
+
+def battlecup_result(outcome: BattlecupOutcome) -> str:
+    lines = [f"🏆 Банк <b>{format_cm(outcome.pool)}</b>."]
+    for payout in outcome.payouts:
+        name = escape_name(payout.first_name, payout.username, payout.user_id)
+        lines.append(
+            f"{name}: <b>{bowling_score(payout.roll)}</b>, сейчас <b>{format_cm(payout.size)}</b>"
+        )
+    winners = [payout for payout in outcome.payouts if payout.prize > 0]
+    lines.append("")
+    if len(winners) == 1:
+        winner = winners[0]
+        name = escape_name(winner.first_name, winner.username, winner.user_id)
+        lines.append(f"{name} забирает весь банк, <b>{format_cm(winner.prize)}</b>.")
+    else:
+        prizes = {payout.prize for payout in winners}
+        if len(prizes) == 1:
+            lines.append(f"Первых мест {len(winners)}, каждому <b>{format_cm(winners[0].prize)}</b>.")
+        else:
+            lines.append("Первых мест несколько, банк разошёлся так:")
+            for payout in winners:
+                name = escape_name(payout.first_name, payout.username, payout.user_id)
+                lines.append(f"{name}: <b>{format_cm(payout.prize)}</b>")
+    winner_names = [escape_name(payout.first_name, payout.username, payout.user_id) for payout in winners]
+    lines.append(_winner_compliment(winner_names))
+    if outcome.payouts:
+        worst = min(payout.roll for payout in outcome.payouts)
+        last = [payout for payout in outcome.payouts if payout.roll == worst and payout.prize == 0]
+        if last:
+            last_names = [escape_name(payout.first_name, payout.username, payout.user_id) for payout in last]
+            lines.append(_last_place_taunt(last_names))
+    return "\n".join(lines)
 
 
 def duel_challenge(challenger: str, opponent: str) -> str:

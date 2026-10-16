@@ -20,6 +20,7 @@ from aiogram.types import (
     User,
 )
 
+from pipisa.battlecup import MAX_MINUTES, MIN_MINUTES, STAKE, join_keyboard
 from pipisa.db import Database, Entry, Standing
 from pipisa.stats_card import CardData, render_stats
 from pipisa.texts import (
@@ -30,6 +31,7 @@ from pipisa.texts import (
     PRIVATE_WELCOME,
     cooldown_message,
     display_name,
+    battlecup_announce,
     duel_challenge,
     duel_refusal,
     duel_result,
@@ -493,6 +495,81 @@ async def cb_duel(query: CallbackQuery, db: Database) -> None:
         await query.message.answer("Эта дуэль уже посчитана.")
         return
     await query.message.answer(duel_result(outcome))
+
+
+_MINUTES = re.compile(r"^\d{1,4}$")
+
+
+def _battlecup_minutes(args: str | None) -> int | None:
+    token = (args or "").strip()
+    if not _MINUTES.fullmatch(token):
+        return None
+    return int(token)
+
+
+async def _refresh_battlecup(message: Message, db: Database, battlecup_id: int) -> None:
+    cup = await db.get_battlecup(battlecup_id)
+    if cup is None or cup.status != "pending":
+        return
+    names = [escape_name(player.first_name, player.username, player.user_id) for player in cup.players]
+    text = battlecup_announce(
+        starts_in=max(0, cup.starts_at - int(time.time())),
+        stake=cup.stake,
+        names=names,
+    )
+    try:
+        await message.edit_text(text, reply_markup=join_keyboard(battlecup_id))
+    except TelegramBadRequest:
+        logger.info("Не смог обновить набор баттлкапа %s", battlecup_id)
+
+
+@router.message(Command("battlecup"))
+async def cmd_battlecup(message: Message, command: CommandObject, db: Database) -> None:
+    if message.from_user is None or message.from_user.is_bot:
+        return
+    if not _is_group(message):
+        await message.answer(GROUP_ONLY)
+        return
+    minutes = _battlecup_minutes(command.args)
+    if minutes is None or not MIN_MINUTES <= minutes <= MAX_MINUTES:
+        await message.reply(f"Напиши длительность в минутах, от {MIN_MINUTES} до {MAX_MINUTES}: /battlecup 5")
+        return
+    starts_at = int(time.time()) + minutes * 60
+    battlecup_id = await db.create_battlecup(chat_id=message.chat.id, stake=STAKE, starts_at=starts_at)
+    if battlecup_id is None:
+        await message.reply("В этом чате уже есть баттлкап.")
+        return
+    sent = await message.reply(
+        battlecup_announce(starts_in=minutes * 60, stake=STAKE, names=[]),
+        reply_markup=join_keyboard(battlecup_id),
+    )
+    await db.set_battlecup_message(battlecup_id, sent.message_id)
+
+
+@router.callback_query(F.data.startswith("cup:join:"))
+async def cb_battlecup_join(query: CallbackQuery, db: Database) -> None:
+    if query.from_user is None or query.from_user.is_bot or query.data is None:
+        return
+    if not isinstance(query.message, Message):
+        await query.answer("Сообщение уже недоступно.", show_alert=True)
+        return
+    try:
+        battlecup_id = int(query.data.removeprefix("cup:join:"))
+    except ValueError:
+        await query.answer("Не понял кнопку.", show_alert=True)
+        return
+    result = await db.join_battlecup(battlecup_id, query.from_user.id)
+    if result == "unknown":
+        await query.answer("Сначала сделай /dick, чтобы было что ставить.", show_alert=True)
+        return
+    if result == "already":
+        await query.answer("Ты уже в игре.", show_alert=True)
+        return
+    if result == "closed":
+        await query.answer("Набор уже закрыт.", show_alert=True)
+        return
+    await query.answer("Взнос принят.")
+    await _refresh_battlecup(query.message, db, battlecup_id)
 
 
 @router.message(Command("set"))
