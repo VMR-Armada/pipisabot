@@ -232,7 +232,10 @@ async def cmd_global(message: Message, db: Database) -> None:
     if _is_group(message):
         await db.touch_chat(message.chat.id, message.chat.title)
         await _claim(message, db)
-    entries, standing = await db.global_top(message.from_user.id)
+    entries, standing = await db.global_top(
+        message.from_user.id,
+        message.chat.id if _is_group(message) else None,
+    )
     await message.reply(
         top_message(
             "Глобальный топ 10",

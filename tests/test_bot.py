@@ -148,13 +148,19 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(standing.total, 2)
         self.assertEqual(standing.size, 4)
 
-        global_entries, global_standing = await self.db.global_top(1)
+        global_entries, global_standing = await self.db.global_top(1, chat_id=-100)
         self.assertEqual([entry.user_id for entry in global_entries], [2, 1])
-        self.assertEqual(global_entries[1].size, 8)
-        self.assertEqual(global_entries[1].chat_title, "Другой")
+        self.assertEqual(global_entries[1].size, 4)
+        self.assertEqual(global_entries[1].chat_title, "Чат")
         assert global_standing is not None
-        self.assertEqual(global_standing.size, 8)
+        self.assertEqual(global_standing.size, 4)
         self.assertEqual(global_standing.rank, 2)
+
+        best_entries, best_standing = await self.db.global_top(1)
+        self.assertEqual(best_entries[1].size, 8)
+        self.assertEqual(best_entries[1].chat_title, "Другой")
+        assert best_standing is not None
+        self.assertEqual(best_standing.size, 8)
 
         self.now = boundary
         free_again = await self.db.try_grow(

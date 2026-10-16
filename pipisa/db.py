@@ -615,7 +615,10 @@ class Database:
             return board[:limit], standing
 
     async def global_top(
-        self, user_id: int, limit: int = 10
+        self,
+        user_id: int,
+        chat_id: int | None = None,
+        limit: int = 10,
     ) -> tuple[list[Entry], Standing | None]:
         async with self._lock:
             cursor = await self.conn.execute(
@@ -625,7 +628,11 @@ class Database:
                         user_id, chat_id, size, username, first_name, chat_title, plays,
                         ROW_NUMBER() OVER (
                             PARTITION BY user_id
-                            ORDER BY size DESC, plays DESC, chat_id
+                            ORDER BY
+                                CASE WHEN chat_id = ? THEN 0 ELSE 1 END,
+                                size DESC,
+                                plays DESC,
+                                chat_id
                         ) AS rn
                     FROM players
                     WHERE plays > 0
@@ -636,10 +643,10 @@ class Database:
                 ORDER BY size DESC, plays DESC, user_id
                 LIMIT ?
                 """,
-                (limit,),
+                (chat_id, limit),
             )
             entries = [_entry(row) for row in await cursor.fetchall()]
-            standing = await self._global_standing(user_id)
+            standing = await self._global_standing(user_id, chat_id)
             return entries, standing
 
     async def _upsert_player(
@@ -814,14 +821,26 @@ class Database:
             return rows[0]
         return None
 
-    async def _global_standing(self, user_id: int) -> Standing | None:
+    async def _global_standing(self, user_id: int, chat_id: int | None) -> Standing | None:
         cursor = await self.conn.execute(
             """
-            WITH best AS (
-                SELECT user_id, MAX(size) AS size
+            WITH chosen AS (
+                SELECT
+                    user_id,
+                    size,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY user_id
+                        ORDER BY
+                            CASE WHEN chat_id = ? THEN 0 ELSE 1 END,
+                            size DESC,
+                            plays DESC,
+                            chat_id
+                    ) AS rn
                 FROM players
                 WHERE plays > 0
-                GROUP BY user_id
+            ),
+            best AS (
+                SELECT user_id, size FROM chosen WHERE rn = 1
             )
             SELECT
                 (SELECT size FROM best WHERE user_id = ?) AS size,
@@ -831,7 +850,7 @@ class Database:
                 ) AS rank,
                 (SELECT COUNT(*) FROM best) AS total
             """,
-            (user_id, user_id),
+            (chat_id, user_id, user_id),
         )
         row = await cursor.fetchone()
         if row is None or row["size"] is None:
