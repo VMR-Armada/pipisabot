@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import timezone
 from pathlib import Path
 
@@ -10,7 +11,7 @@ from pipisa.day import next_midnight
 from pipisa.db import Database, Entry
 from pipisa.handlers import _rows
 from pipisa.stats_card import CardData, _font, render_stats
-from pipisa.texts import format_wait, plural, top_message
+from pipisa.texts import duel_refusal, format_wait, plural, top_message
 from pipisa.transfer import ImportItem, parse_import_text, parse_size
 
 
@@ -42,6 +43,13 @@ class TextTests(unittest.TestCase):
 
         chat_text = top_message("Топ 10 этого чата", _rows([entry], with_chat=False), None)
         self.assertIn("@anna", chat_text)
+
+    def test_duel_refusal_taunts(self) -> None:
+        with patch("pipisa.texts.random.choice", side_effect=lambda pool: pool[0]):
+            backed_out = duel_refusal("Анна", challenger=True)
+            declined = duel_refusal("Борис", challenger=False)
+        self.assertEqual(backed_out, "Анна отказался от дуэли.\nВызвал и сразу передумал. Впечатляет.")
+        self.assertEqual(declined, "Борис отказался от дуэли.\nКубик даже не понадобился.")
 
     def test_wait(self) -> None:
         self.assertEqual(format_wait(30), "меньше минуты")

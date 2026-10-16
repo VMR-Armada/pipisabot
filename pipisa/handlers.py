@@ -31,6 +31,7 @@ from pipisa.texts import (
     cooldown_message,
     display_name,
     duel_challenge,
+    duel_refusal,
     duel_result,
     escape_name,
     format_cm,
@@ -342,7 +343,6 @@ def _duel_keyboard(duel_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Принять", callback_data=f"duel:ok:{duel_id}"),
                 InlineKeyboardButton(text="Отказаться", callback_data=f"duel:no:{duel_id}"),
             ],
-            [InlineKeyboardButton(text="Отменить", callback_data=f"duel:cancel:{duel_id}")],
         ]
     )
 
@@ -404,7 +404,7 @@ async def cmd_duel(message: Message, command: CommandObject, db: Database) -> No
             and existing.challenger_id == challenger_id
         ):
             await message.reply(
-                "Этот вызов ещё ждёт ответа. Пока его не приняли, его можно отменить.",
+                "Этот вызов ещё ждёт ответа. От него можно отказаться.",
                 reply_markup=_duel_keyboard(existing.id),
             )
             return
@@ -436,17 +436,17 @@ async def cb_duel(query: CallbackQuery, db: Database) -> None:
     if duel is None or query.message.chat.id != duel.chat_id:
         await query.answer("Дуэль не найдена.", show_alert=True)
         return
-    if parts[1] == "cancel":
-        if query.from_user.id != duel.challenger_id:
-            await query.answer("Отменить вызов может только тот, кто его отправил.", show_alert=True)
-            return
+    if parts[1] in {"no", "cancel"} and query.from_user.id == duel.challenger_id:
         cancelled = await db.cancel_duel(duel_id, query.from_user.id)
         if not cancelled:
             await query.answer("Эта дуэль уже закрыта.", show_alert=True)
             return
         await query.answer()
         challenger = escape_name(duel.challenger_name, duel.challenger_username, duel.challenger_id)
-        await query.message.edit_text(f"{challenger} отменил вызов.", reply_markup=None)
+        await query.message.edit_text(duel_refusal(challenger, challenger=True), reply_markup=None)
+        return
+    if parts[1] == "cancel":
+        await query.answer("Отказаться можно кнопкой «Отказаться».", show_alert=True)
         return
     if query.from_user.id != duel.opponent_id:
         await query.answer("Ответить может только тот, кого вызвали.", show_alert=True)
@@ -458,7 +458,7 @@ async def cb_duel(query: CallbackQuery, db: Database) -> None:
             return
         await query.answer()
         opponent = escape_name(duel.opponent_name, duel.opponent_username, duel.opponent_id)
-        await query.message.edit_text(f"{opponent} отказался от дуэли.", reply_markup=None)
+        await query.message.edit_text(duel_refusal(opponent, challenger=False), reply_markup=None)
         return
 
     claimed = await db.claim_duel(duel_id, query.from_user.id)
