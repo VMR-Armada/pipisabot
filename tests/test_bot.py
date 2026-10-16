@@ -7,9 +7,10 @@ from pathlib import Path
 
 from pipisa.day import next_midnight
 
-from pipisa.db import Database
+from pipisa.db import Database, Entry
+from pipisa.handlers import _rows
 from pipisa.stats_card import CardData, _font, render_stats
-from pipisa.texts import format_wait, plural
+from pipisa.texts import format_wait, plural, top_message
 from pipisa.transfer import ImportItem, parse_import_text, parse_size
 
 
@@ -20,6 +21,27 @@ class TextTests(unittest.TestCase):
         self.assertEqual(plural(5, "попытка", "попытки", "попыток"), "попыток")
         self.assertEqual(plural(11, "попытка", "попытки", "попыток"), "попыток")
         self.assertEqual(plural(21, "час", "часа", "часов"), "час")
+
+    def test_global_top_omits_profile_mention(self) -> None:
+        entry = Entry(
+            user_id=1,
+            chat_id=-100,
+            size=10,
+            username="anna",
+            first_name="Анна",
+            chat_title="Чат",
+        )
+        text = top_message(
+            "Глобальный топ 10",
+            _rows([entry], with_chat=True, show_username=False),
+            None,
+        )
+        self.assertIn("Анна", text)
+        self.assertIn("Чат", text)
+        self.assertNotIn("@anna", text)
+
+        chat_text = top_message("Топ 10 этого чата", _rows([entry], with_chat=False), None)
+        self.assertIn("@anna", chat_text)
 
     def test_wait(self) -> None:
         self.assertEqual(format_wait(30), "меньше минуты")

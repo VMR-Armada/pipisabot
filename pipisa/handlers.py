@@ -58,14 +58,20 @@ def _person(message: Message) -> tuple[int, str | None, str]:
     return user.id, user.username, user.first_name or "Игрок"
 
 
-def _rows(entries: list[Entry], with_chat: bool) -> list[tuple[int, str, int, str | None]]:
+def _rows(
+    entries: list[Entry],
+    with_chat: bool,
+    *,
+    show_username: bool = True,
+) -> list[tuple[int, str, int, str | None]]:
     rows = []
     for entry in entries:
         note = entry.chat_title if with_chat else None
+        username = entry.username if show_username else None
         rows.append(
             (
                 entry.user_id,
-                escape_name(entry.first_name, entry.username, entry.user_id),
+                escape_name(entry.first_name, username, entry.user_id),
                 entry.size,
                 note,
             )
@@ -227,7 +233,11 @@ async def cmd_global(message: Message, db: Database) -> None:
         await _claim(message, db)
     entries, standing = await db.global_top(message.from_user.id)
     await message.reply(
-        top_message("Глобальный топ 10", _rows(entries, with_chat=True), _standing(standing))
+        top_message(
+            "Глобальный топ 10",
+            _rows(entries, with_chat=True, show_username=False),
+            _standing(standing),
+        )
     )
 
 
