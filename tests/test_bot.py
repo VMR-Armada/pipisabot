@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -15,7 +16,16 @@ from pipisa.day import next_midnight
 from pipisa.db import BattlecupOutcome, BattlecupPayout, Database, Entry, prize_shares
 from pipisa.handlers import _rows
 from pipisa.stats_card import CardData, _font, render_stats
-from pipisa.texts import battlecup_result, duel_refusal, format_wait, plural, top_message
+from pipisa.texts import (
+    battlecup_result,
+    bowling_score,
+    clear_disabled,
+    clear_enabled,
+    duel_refusal,
+    format_wait,
+    plural,
+    top_message,
+)
 from pipisa.transfer import ImportItem, parse_import_text, parse_size
 
 
@@ -71,9 +81,25 @@ class TextTests(unittest.TestCase):
         )
         with patch("pipisa.texts.random.choice", side_effect=lambda pool: pool[0]):
             text = battlecup_result(outcome)
+        self.assertIn("Анна: <b>страйк, 6 кеглей</b>", text)
+        self.assertIn("Борис: <b>3 кегли</b>", text)
+        self.assertIn("Вова: <b>мимо, 0 кеглей</b>", text)
         self.assertIn("Анна, кегли сегодня были на твоей стороне.", text)
         self.assertIn("Вова, шар увидел кегли и сделал вид, что их нет.", text)
         self.assertNotIn("Борис, шар", text)
+
+    def test_bowling_score_names_the_pins(self) -> None:
+        self.assertEqual(bowling_score(1), "мимо, 0 кеглей")
+        self.assertEqual(bowling_score(2), "2 кегли")
+        self.assertEqual(bowling_score(4), "4 кегли")
+        self.assertEqual(bowling_score(5), "5 кеглей")
+        self.assertEqual(bowling_score(6), "страйк, 6 кеглей")
+
+    def test_clear_names_the_age(self) -> None:
+        self.assertIn("старше 20 минут", clear_enabled(20))
+        self.assertIn("старше 1 минуты", clear_enabled(1))
+        self.assertIn("старше 21 минуты", clear_enabled(21))
+        self.assertIn("больше не удаляю", clear_disabled())
 
     def test_battlecup_countdown_steps_once_a_minute(self) -> None:
         start = 1_000
@@ -449,6 +475,118 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         assert winner is not None and loser is not None
         self.assertEqual(winner.rivals, [("Борис", 1, 0, 0)])
         self.assertEqual(loser.rivals, [("Анна", 0, 1, 0)])
+
+    async def test_ffa_duel_is_open_until_someone_accepts(self) -> None:
+        await self.db.set_size(
+            user_id=1, chat_id=-100, username="ann", first_name="Анна", chat_title="Чат", size=20
+        )
+        await self.db.set_size(
+            user_id=2, chat_id=-100, username="boris", first_name="Борис", chat_title="Чат", size=15
+        )
+        duel_id = await self.db.create_ffa_duel(chat_id=-100, challenger_id=1)
+        assert duel_id is not None
+        self.assertIsNone(await self.db.create_ffa_duel(chat_id=-100, challenger_id=1))
+        pending = await self.db.get_duel(duel_id)
+        assert pending is not None
+        self.assertIsNone(pending.opponent_id)
+        self.assertFalse(await self.db.claim_duel(duel_id, 1))
+        self.assertFalse(await self.db.claim_duel(duel_id, 3))
+        self.assertFalse(await self.db.decline_duel(duel_id, 2))
+        self.assertTrue(await self.db.claim_duel(duel_id, 2))
+        self.assertFalse(await self.db.claim_duel(duel_id, 2))
+        accepted = await self.db.get_duel(duel_id)
+        assert accepted is not None
+        self.assertEqual(accepted.opponent_id, 2)
+        self.assertEqual(accepted.status, "rolling")
+        outcome = await self.db.apply_duel(duel_id, 6, 2)
+        assert outcome is not None
+        self.assertEqual(outcome.challenger_size, 24)
+        self.assertEqual(outcome.opponent_size, 11)
+        again = await self.db.create_ffa_duel(chat_id=-100, challenger_id=1)
+        assert again is not None
+        self.assertTrue(await self.db.cancel_duel(again, 1))
+
+    async def test_cleanup_keeps_pending_duels_and_long_battlecups(self) -> None:
+        await self.db.set_size(
+            user_id=1, chat_id=-100, username="ann", first_name="Анна", chat_title="Чат", size=20
+        )
+        await self.db.set_size(
+            user_id=2, chat_id=-100, username="boris", first_name="Борис", chat_title="Чат", size=15
+        )
+        started = self.now
+        await self.db.set_clear_minutes(-100, 20)
+        await self.db.set_clear_minutes(-200, 20)
+        await self.db.track_message(-100, 1)
+        duel_id = await self.db.create_duel(chat_id=-100, challenger_id=1, opponent_id=2)
+        assert duel_id is not None
+        await self.db.hold_message(-100, 2, kind="duel", ref_id=duel_id)
+        long_id = await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=started + 3600)
+        assert long_id is not None
+        await self.db.hold_message(-100, 3, kind="battlecup", ref_id=long_id)
+        short_id = await self.db.create_battlecup(chat_id=-200, stake=2, starts_at=started + 300)
+        assert short_id is not None
+        await self.db.hold_message(-200, 5, kind="battlecup", ref_id=short_id)
+
+        self.now = started + 21 * 60
+        await self.db.track_message(-100, 4)
+        due = set(await self.db.due_bot_messages(self.now))
+        self.assertIn((-100, 1), due)
+        self.assertIn((-200, 5), due)
+        self.assertNotIn((-100, 2), due)
+        self.assertNotIn((-100, 3), due)
+        self.assertNotIn((-100, 4), due)
+
+        self.assertTrue(await self.db.claim_duel(duel_id, 2))
+        due = set(await self.db.due_bot_messages(self.now))
+        self.assertIn((-100, 2), due)
+
+        await self.db.set_clear_minutes(-100, None)
+        due = set(await self.db.due_bot_messages(self.now))
+        self.assertNotIn((-100, 1), due)
+        self.assertIn((-200, 5), due)
+
+    async def test_old_duel_table_accepts_open_challenge(self) -> None:
+        await self.db.close()
+        path = Path(self._dir.name) / "legacy.db"
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE duels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    challenger_id INTEGER NOT NULL,
+                    opponent_id INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    challenger_roll INTEGER,
+                    opponent_roll INTEGER,
+                    created_at INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO duels (chat_id, challenger_id, opponent_id, status, created_at)
+                VALUES (-100, 1, 2, 'pending', 1)
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.db = Database(path, grow_min=-5, grow_max=10, zone=self.zone, clock=lambda: self.now)
+        await self.db.connect()
+        await self.db.set_size(
+            user_id=1, chat_id=-100, username="ann", first_name="Анна", chat_title="Чат", size=20
+        )
+        await self.db.set_size(
+            user_id=2, chat_id=-100, username="boris", first_name="Борис", chat_title="Чат", size=15
+        )
+        old = await self.db.get_duel(1)
+        assert old is not None
+        self.assertEqual(old.opponent_id, 2)
+        ffa_id = await self.db.create_ffa_duel(chat_id=-100, challenger_id=1)
+        assert ffa_id is not None
+        self.assertTrue(await self.db.claim_duel(ffa_id, 2))
 
 
 class CardTests(unittest.TestCase):

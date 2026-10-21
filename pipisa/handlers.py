@@ -21,12 +21,17 @@ from aiogram.types import (
 )
 
 from pipisa.battlecup import MAX_MINUTES, MIN_MINUTES, STAKE, announcement_text, join_keyboard
+from pipisa.cleanup import CLEAR_MAX_MINUTES, CLEAR_MIN_MINUTES
 from pipisa.db import Database, Entry, Standing
 from pipisa.stats_card import CardData, render_stats
 from pipisa.texts import (
     GROUP_ONLY,
     HELP_TEXT,
     PRIVATE_WELCOME,
+    ffa_challenge,
+    clear_disabled,
+    clear_enabled,
+    clear_status,
     cooldown_message,
     display_name,
     duel_challenge,
@@ -338,20 +343,53 @@ async def cmd_duel(message: Message, command: CommandObject, db: Database) -> No
             and existing.status == "pending"
             and existing.challenger_id == challenger_id
         ):
-            await message.reply(
+            sent = await message.reply(
                 "Этот вызов ещё ждёт ответа. От него можно отказаться.",
                 reply_markup=_duel_keyboard(existing.id),
             )
+            await db.hold_message(sent.chat.id, sent.message_id, kind="duel", ref_id=existing.id)
             return
         await message.reply("Между вами уже есть неотвеченный вызов.")
         return
-    await message.reply(
+    sent = await message.reply(
         duel_challenge(
             escape_name(challenger_first, challenger_username, challenger_id),
             escape_name(opponent.first_name, opponent.username, opponent.user_id),
         ),
         reply_markup=_duel_keyboard(duel_id),
     )
+    await db.hold_message(sent.chat.id, sent.message_id, kind="duel", ref_id=duel_id)
+
+
+@router.message(Command("ffa"))
+async def cmd_ffa(message: Message, db: Database) -> None:
+    if message.from_user is None or message.from_user.is_bot:
+        return
+    if not _is_group(message):
+        await message.answer(GROUP_ONLY)
+        return
+    challenger_id, challenger_username, challenger_first = _person(message)
+    challenger = await db.find_player(challenger_id, message.chat.id)
+    if challenger is None:
+        await message.reply("Сначала сделай /dick, чтобы было что ставить на дуэль.")
+        return
+    duel_id = await db.create_ffa_duel(chat_id=message.chat.id, challenger_id=challenger_id)
+    if duel_id is None:
+        existing = await db.find_pending_ffa(message.chat.id, challenger_id)
+        if existing is None:
+            await message.reply("Открытый вызов уже есть.")
+            return
+        sent = await message.reply(
+            "Этот вызов ещё ждёт желающего. От него можно отказаться.",
+            reply_markup=_duel_keyboard(existing.id),
+        )
+        await db.hold_message(sent.chat.id, sent.message_id, kind="duel", ref_id=existing.id)
+        return
+    sent = await message.reply(
+        ffa_challenge(escape_name(challenger_first, challenger_username, challenger_id)),
+        reply_markup=_duel_keyboard(duel_id),
+    )
+    await db.hold_message(sent.chat.id, sent.message_id, kind="duel", ref_id=duel_id)
 
 
 @router.callback_query(F.data.startswith("duel:"))
@@ -383,6 +421,28 @@ async def cb_duel(query: CallbackQuery, db: Database) -> None:
     if parts[1] == "cancel":
         await query.answer("Отказаться можно кнопкой «Отказаться».", show_alert=True)
         return
+    if duel.opponent_id is None:
+        if parts[1] == "no":
+            await query.answer("Отменить открытый вызов может только его автор.", show_alert=True)
+            return
+        if query.from_user.id == duel.challenger_id:
+            await query.answer("Свой вызов принять нельзя.", show_alert=True)
+            return
+        player = await db.find_player(query.from_user.id, duel.chat_id)
+        if player is None:
+            await query.answer("Сначала сделай /dick, чтобы было что ставить.", show_alert=True)
+            return
+        busy = await db.find_open_duel(duel.chat_id, duel.challenger_id, query.from_user.id)
+        if busy is not None:
+            await query.answer("Между вами уже есть неотвеченный вызов.", show_alert=True)
+            return
+        claimed = await db.claim_duel(duel_id, query.from_user.id)
+        if not claimed:
+            await query.answer("Этот вызов уже разобрали.", show_alert=True)
+            return
+        await query.answer()
+        await _play_duel(query.message, db, duel_id)
+        return
     if query.from_user.id != duel.opponent_id:
         await query.answer("Ответить может только тот, кого вызвали.", show_alert=True)
         return
@@ -401,17 +461,25 @@ async def cb_duel(query: CallbackQuery, db: Database) -> None:
         await query.answer("Эта дуэль уже закрыта.", show_alert=True)
         return
     await query.answer()
+    await _play_duel(query.message, db, duel_id)
+
+
+async def _play_duel(message: Message, db: Database, duel_id: int) -> None:
+    duel = await db.get_duel(duel_id)
+    if duel is None or duel.opponent_id is None:
+        await message.answer("Дуэль не найдена.")
+        return
     challenger = escape_name(duel.challenger_name, duel.challenger_username, duel.challenger_id)
     opponent = escape_name(duel.opponent_name, duel.opponent_username, duel.opponent_id)
-    await query.message.edit_text(
+    await message.edit_text(
         f"{challenger} против {opponent}. Бросаем кубики.",
         reply_markup=None,
     )
     try:
-        await query.message.answer(f"Кубик {challenger}")
-        first = await query.message.answer_dice(emoji="🎲")
-        await query.message.answer(f"Кубик {opponent}")
-        second = await query.message.answer_dice(emoji="🎲")
+        await message.answer(f"Кубик {challenger}")
+        first = await message.answer_dice(emoji="🎲")
+        await message.answer(f"Кубик {opponent}")
+        second = await message.answer_dice(emoji="🎲")
         if first.dice is None or second.dice is None:
             raise RuntimeError("Telegram не вернул значение кубика")
         await asyncio.sleep(4)
@@ -419,12 +487,12 @@ async def cb_duel(query: CallbackQuery, db: Database) -> None:
     except Exception:
         logger.exception("Не удалось доиграть дуэль %s", duel_id)
         await db.release_duel(duel_id)
-        await query.message.answer("Кубики не бросились. Вызов снова можно принять.")
+        await message.answer("Кубики не бросились. Вызов снова можно принять.")
         return
     if outcome is None:
-        await query.message.answer("Эта дуэль уже посчитана.")
+        await message.answer("Эта дуэль уже посчитана.")
         return
-    await query.message.answer(duel_result(outcome))
+    await message.answer(duel_result(outcome))
 
 
 _MINUTES = re.compile(r"^\d{1,4}$")
@@ -472,6 +540,32 @@ async def cmd_battlecup(message: Message, command: CommandObject, db: Database) 
         reply_markup=join_keyboard(battlecup_id),
     )
     await db.set_battlecup_message(battlecup_id, sent.message_id)
+    await db.hold_message(sent.chat.id, sent.message_id, kind="battlecup", ref_id=battlecup_id)
+
+
+@router.message(Command("clear"))
+async def cmd_clear(message: Message, command: CommandObject, db: Database) -> None:
+    if message.from_user is None or message.from_user.is_bot:
+        return
+    if not _is_group(message):
+        await message.answer(GROUP_ONLY)
+        return
+    token = (command.args or "").strip()
+    if not token:
+        await message.reply(clear_status(await db.get_clear_minutes(message.chat.id)))
+        return
+    minutes = _battlecup_minutes(token)
+    if minutes is None or minutes > CLEAR_MAX_MINUTES:
+        await message.reply(
+            f"Напиши минуты от {CLEAR_MIN_MINUTES} до {CLEAR_MAX_MINUTES}: /clear 20. Ноль выключает очистку."
+        )
+        return
+    if minutes < CLEAR_MIN_MINUTES:
+        await db.set_clear_minutes(message.chat.id, None)
+        await message.reply(clear_disabled())
+        return
+    await db.set_clear_minutes(message.chat.id, minutes)
+    await message.reply(clear_enabled(minutes))
 
 
 @router.callback_query(F.data.startswith("cup:join:"))

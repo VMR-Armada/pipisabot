@@ -17,7 +17,9 @@ HELP_TEXT = (
     "/global_top — топ 10 по всем чатам. Размер из этого чата, если человек здесь играет\n"
     "/stats — карточка статистики\n"
     "/duel — дуэль на кубиках: ответом на сообщение или через /duel @ник. Вызов можно отменить, пока его не приняли\n"
+    "/ffa — открытый вызов: принять может любой, кто уже делал замер\n"
     "/battlecup 5 — турнир через 5 минут. Кнопка «Присоединиться» ставит 2 см, победителя выбирает боулинг\n"
+    "/clear 20 — удалять сообщения бота старше 20 минут. Непринятые дуэли и долгий набор баттлкапа остаются\n"
     "/help — эта справка"
 )
 
@@ -184,10 +186,10 @@ def battlecup_announce(*, starts_in: int, stake: int, names: list[str]) -> str:
 
 def bowling_score(value: int) -> str:
     if value == 6:
-        return "страйк"
+        return "страйк, 6 кеглей"
     if value == 1:
-        return "мимо"
-    return str(value)
+        return "мимо, 0 кеглей"
+    return f"{value} {plural(value, 'кегля', 'кегли', 'кеглей')}"
 
 
 def _winner_compliment(names: list[str]) -> str:
@@ -261,6 +263,41 @@ def battlecup_result(outcome: BattlecupOutcome) -> str:
             last_names = [escape_name(payout.first_name, payout.username, payout.user_id) for payout in last]
             lines.append(_last_place_taunt(last_names))
     return "\n".join(lines)
+
+
+def _older_than_minutes(minutes: int) -> str:
+    number = abs(minutes) % 100
+    word = "минуты" if number % 10 == 1 and number != 11 else "минут"
+    return f"{minutes} {word}"
+
+
+def clear_enabled(minutes: int) -> str:
+    return (
+        f"Буду удалять свои сообщения старше {_older_than_minutes(minutes)}.\n"
+        "Непринятые дуэли оставлю, пока их не закроют. "
+        "Баттлкап с набором дольше этого срока тоже не трону, пока идёт сбор."
+    )
+
+
+def clear_disabled() -> str:
+    return "Очистка выключена. Свои сообщения больше не удаляю."
+
+
+def clear_status(minutes: int | None) -> str:
+    if minutes is None:
+        return "Очистка выключена. Включить: /clear 20"
+    return (
+        f"Сейчас удаляю свои сообщения старше {_older_than_minutes(minutes)}.\n"
+        "Выключить: /clear 0"
+    )
+
+
+def ffa_challenge(challenger: str) -> str:
+    return (
+        f"📏 {challenger} бросает открытый вызов.\n"
+        "Принять может любой, кто уже делал замер.\n"
+        "Пока вызов не принят, от него можно отказаться."
+    )
 
 
 def duel_challenge(challenger: str, opponent: str) -> str:

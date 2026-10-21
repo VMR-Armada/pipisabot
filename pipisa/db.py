@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import random
 import time
 from collections.abc import Callable
@@ -30,7 +31,7 @@ class Duel:
     id: int
     chat_id: int
     challenger_id: int
-    opponent_id: int
+    opponent_id: int | None
     status: str
     challenger_name: str
     challenger_username: str | None
@@ -185,7 +186,7 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id INTEGER NOT NULL,
                 challenger_id INTEGER NOT NULL,
-                opponent_id INTEGER NOT NULL,
+                opponent_id INTEGER,
                 status TEXT NOT NULL,
                 challenger_roll INTEGER,
                 opponent_roll INTEGER,
@@ -232,16 +233,34 @@ class Database:
                 chat_title TEXT,
                 PRIMARY KEY (chat_id, username, name_key)
             );
+
+            CREATE TABLE IF NOT EXISTS chat_cleanup (
+                chat_id INTEGER PRIMARY KEY,
+                minutes INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS bot_messages (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'plain',
+                ref_id INTEGER,
+                PRIMARY KEY (chat_id, message_id)
+            );
             """
         )
+        await self._ensure_nullable_duel_opponent()
         await self._ensure_contest_opponent()
         await self._backfill_contests()
         await self._db.commit()
 
     async def close(self) -> None:
-        if self._db is not None:
-            await self._db.close()
-            self._db = None
+        if self._db is None:
+            return
+        with contextlib.suppress(Exception):
+            await self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        await self._db.close()
+        self._db = None
 
     @property
     def conn(self) -> aiosqlite.Connection:
@@ -431,6 +450,33 @@ class Database:
                 await self.conn.rollback()
                 raise
 
+    async def create_ffa_duel(self, *, chat_id: int, challenger_id: int) -> int | None:
+        async with self._lock:
+            try:
+                existing = await self._pending_ffa_id(chat_id, challenger_id)
+                if existing is not None:
+                    await self.conn.commit()
+                    return None
+                cursor = await self.conn.execute(
+                    """
+                    INSERT INTO duels (chat_id, challenger_id, opponent_id, status, created_at)
+                    VALUES (?, ?, NULL, 'pending', ?)
+                    """,
+                    (chat_id, challenger_id, self._clock()),
+                )
+                await self.conn.commit()
+                return int(cursor.lastrowid)
+            except Exception:
+                await self.conn.rollback()
+                raise
+
+    async def find_pending_ffa(self, chat_id: int, challenger_id: int) -> Duel | None:
+        async with self._lock:
+            duel_id = await self._pending_ffa_id(chat_id, challenger_id)
+            if duel_id is None:
+                return None
+            return await self._duel(duel_id)
+
     async def find_open_duel(self, chat_id: int, user_a: int, user_b: int) -> Duel | None:
         async with self._lock:
             cursor = await self.conn.execute(
@@ -457,14 +503,35 @@ class Database:
     async def claim_duel(self, duel_id: int, user_id: int) -> bool:
         async with self._lock:
             try:
-                cursor = await self.conn.execute(
-                    """
-                    UPDATE duels
-                    SET status = 'rolling'
-                    WHERE id = ? AND opponent_id = ? AND status = 'pending'
-                    """,
-                    (duel_id, user_id),
-                )
+                duel = await self._duel(duel_id)
+                if duel is None or duel.status != "pending" or user_id == duel.challenger_id:
+                    await self.conn.commit()
+                    return False
+                if duel.opponent_id is None:
+                    row = await self._get_row(user_id, duel.chat_id)
+                    if row is None or int(row["plays"]) <= 0:
+                        await self.conn.commit()
+                        return False
+                    cursor = await self.conn.execute(
+                        """
+                        UPDATE duels
+                        SET status = 'rolling', opponent_id = ?
+                        WHERE id = ? AND opponent_id IS NULL AND status = 'pending'
+                        """,
+                        (user_id, duel_id),
+                    )
+                else:
+                    if user_id != duel.opponent_id:
+                        await self.conn.commit()
+                        return False
+                    cursor = await self.conn.execute(
+                        """
+                        UPDATE duels
+                        SET status = 'rolling'
+                        WHERE id = ? AND opponent_id = ? AND status = 'pending'
+                        """,
+                        (duel_id, user_id),
+                    )
                 await self.conn.commit()
                 return cursor.rowcount == 1
             except Exception:
@@ -519,7 +586,7 @@ class Database:
         async with self._lock:
             try:
                 duel = await self._duel(duel_id)
-                if duel is None or duel.status != "rolling":
+                if duel is None or duel.status != "rolling" or duel.opponent_id is None:
                     await self.conn.commit()
                     return None
                 diff = abs(challenger_roll - opponent_roll)
@@ -1028,6 +1095,137 @@ class Database:
             (user_id, chat_id, username, first_name or "Игрок", chat_title, self._clock()),
         )
 
+    async def set_clear_minutes(self, chat_id: int, minutes: int | None) -> None:
+        async with self._lock:
+            if minutes is None or minutes <= 0:
+                await self.conn.execute("DELETE FROM chat_cleanup WHERE chat_id = ?", (chat_id,))
+            else:
+                await self.conn.execute(
+                    """
+                    INSERT INTO chat_cleanup (chat_id, minutes)
+                    VALUES (?, ?)
+                    ON CONFLICT(chat_id) DO UPDATE SET minutes = excluded.minutes
+                    """,
+                    (chat_id, minutes),
+                )
+            await self.conn.commit()
+
+    async def get_clear_minutes(self, chat_id: int) -> int | None:
+        async with self._lock:
+            cursor = await self.conn.execute(
+                "SELECT minutes FROM chat_cleanup WHERE chat_id = ?",
+                (chat_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+            return int(row["minutes"])
+
+    async def track_message(self, chat_id: int, message_id: int) -> None:
+        async with self._lock:
+            await self.conn.execute(
+                """
+                INSERT OR IGNORE INTO bot_messages (chat_id, message_id, created_at, kind)
+                VALUES (?, ?, ?, 'plain')
+                """,
+                (chat_id, message_id, self._clock()),
+            )
+            await self.conn.commit()
+
+    async def hold_message(self, chat_id: int, message_id: int, *, kind: str, ref_id: int) -> None:
+        async with self._lock:
+            await self.conn.execute(
+                """
+                INSERT INTO bot_messages (chat_id, message_id, created_at, kind, ref_id)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, message_id) DO UPDATE SET
+                    kind = excluded.kind,
+                    ref_id = excluded.ref_id
+                """,
+                (chat_id, message_id, self._clock(), kind, ref_id),
+            )
+            await self.conn.commit()
+
+    async def forget_message(self, chat_id: int, message_id: int) -> None:
+        async with self._lock:
+            await self.conn.execute(
+                "DELETE FROM bot_messages WHERE chat_id = ? AND message_id = ?",
+                (chat_id, message_id),
+            )
+            await self.conn.commit()
+
+    async def due_bot_messages(self, now: int) -> list[tuple[int, int]]:
+        async with self._lock:
+            cursor = await self.conn.execute(
+                """
+                SELECT m.chat_id, m.message_id
+                FROM bot_messages m
+                JOIN chat_cleanup c ON c.chat_id = m.chat_id
+                WHERE m.created_at + c.minutes * 60 <= ?
+                  AND NOT (
+                    m.kind = 'duel' AND EXISTS (
+                        SELECT 1 FROM duels d
+                        WHERE d.id = m.ref_id AND d.status = 'pending'
+                    )
+                  )
+                  AND NOT (
+                    m.kind = 'battlecup' AND EXISTS (
+                        SELECT 1 FROM battlecups b
+                        WHERE b.id = m.ref_id
+                          AND b.status = 'pending'
+                          AND (b.starts_at - m.created_at) > c.minutes * 60
+                    )
+                  )
+                """,
+                (now,),
+            )
+            return [(int(row["chat_id"]), int(row["message_id"])) for row in await cursor.fetchall()]
+
+    async def _pending_ffa_id(self, chat_id: int, challenger_id: int) -> int | None:
+        cursor = await self.conn.execute(
+            """
+            SELECT id FROM duels
+            WHERE chat_id = ? AND challenger_id = ? AND opponent_id IS NULL AND status = 'pending'
+            LIMIT 1
+            """,
+            (chat_id, challenger_id),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return int(row["id"])
+
+    async def _ensure_nullable_duel_opponent(self) -> None:
+        cursor = await self.conn.execute("PRAGMA table_info(duels)")
+        columns = {row["name"]: row for row in await cursor.fetchall()}
+        opponent = columns.get("opponent_id")
+        if opponent is None or int(opponent["notnull"]) == 0:
+            return
+        await self.conn.executescript(
+            """
+            CREATE TABLE duels_open (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                challenger_id INTEGER NOT NULL,
+                opponent_id INTEGER,
+                status TEXT NOT NULL,
+                challenger_roll INTEGER,
+                opponent_roll INTEGER,
+                created_at INTEGER NOT NULL
+            );
+            INSERT INTO duels_open (
+                id, chat_id, challenger_id, opponent_id, status,
+                challenger_roll, opponent_roll, created_at
+            )
+            SELECT
+                id, chat_id, challenger_id, opponent_id, status,
+                challenger_roll, opponent_roll, created_at
+            FROM duels;
+            DROP TABLE duels;
+            ALTER TABLE duels_open RENAME TO duels;
+            """
+        )
+
     async def _ensure_contest_opponent(self) -> None:
         cursor = await self.conn.execute("PRAGMA table_info(contest_results)")
         columns = {row["name"] for row in await cursor.fetchall()}
@@ -1217,7 +1415,7 @@ class Database:
                 o.first_name AS opponent_name, o.username AS opponent_username
             FROM duels d
             JOIN players c ON c.user_id = d.challenger_id AND c.chat_id = d.chat_id
-            JOIN players o ON o.user_id = d.opponent_id AND o.chat_id = d.chat_id
+            LEFT JOIN players o ON o.user_id = d.opponent_id AND o.chat_id = d.chat_id
             WHERE d.id = ?
             """,
             (duel_id,),
@@ -1229,11 +1427,11 @@ class Database:
             id=int(row["id"]),
             chat_id=int(row["chat_id"]),
             challenger_id=int(row["challenger_id"]),
-            opponent_id=int(row["opponent_id"]),
+            opponent_id=None if row["opponent_id"] is None else int(row["opponent_id"]),
             status=row["status"],
             challenger_name=row["challenger_name"],
             challenger_username=row["challenger_username"],
-            opponent_name=row["opponent_name"],
+            opponent_name=row["opponent_name"] or "",
             opponent_username=row["opponent_username"],
         )
 

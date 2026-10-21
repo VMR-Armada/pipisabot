@@ -12,6 +12,7 @@ from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.types import BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats
 
 from pipisa.battlecup import watch_battlecups
+from pipisa.cleanup import TrackBotMessages, watch_cleanup
 from pipisa.config import Config
 from pipisa.db import Database
 from pipisa.handlers import router
@@ -22,7 +23,9 @@ GROUP_COMMANDS = [
     BotCommand(command="global_top", description="Глобальный топ 10"),
     BotCommand(command="stats", description="Статистика картинкой"),
     BotCommand(command="duel", description="Вызвать ответом или по нику"),
+    BotCommand(command="ffa", description="Открытый вызов, принять может любой"),
     BotCommand(command="battlecup", description="Турнир на боулинге, взнос 2 см"),
+    BotCommand(command="clear", description="Удалять сообщения бота через N минут"),
     BotCommand(command="help", description="Как играть"),
 ]
 
@@ -56,7 +59,9 @@ async def run(config: Config) -> None:
     )
     dp = Dispatcher(db=db)
     dp.include_router(router)
-    watch = asyncio.create_task(watch_battlecups(bot, db))
+    bot.session.middleware(TrackBotMessages(db))
+    watch_cups = asyncio.create_task(watch_battlecups(bot, db))
+    watch_messages = asyncio.create_task(watch_cleanup(bot, db))
     try:
         await _setup_bot(bot)
         await dp.start_polling(
@@ -65,9 +70,12 @@ async def run(config: Config) -> None:
             drop_pending_updates=True,
         )
     finally:
-        watch.cancel()
+        watch_cups.cancel()
+        watch_messages.cancel()
         with contextlib.suppress(asyncio.CancelledError):
-            await watch
+            await watch_cups
+        with contextlib.suppress(asyncio.CancelledError):
+            await watch_messages
         await db.close()
 
 
