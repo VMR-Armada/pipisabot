@@ -186,12 +186,22 @@ def battlecup_announce(*, starts_in: int, stake: int, names: list[str]) -> str:
     return "\n".join(lines)
 
 
-def bowling_score(value: int) -> str:
-    if value == 6:
+_PINS = {1: 0, 2: 1, 3: 3, 4: 4, 5: 5, 6: 6}
+
+
+def pins_knocked(value: int) -> int:
+    try:
+        return _PINS[value]
+    except KeyError:
+        raise ValueError("В боулинге может выпасть только число от 1 до 6") from None
+
+
+def bowling_score(pins: int) -> str:
+    if pins >= 6:
         return "страйк, 6 кеглей"
-    if value == 1:
+    if pins <= 0:
         return "мимо, 0 кеглей"
-    return f"{value} {plural(value, 'кегля', 'кегли', 'кеглей')}"
+    return f"{pins} {plural(pins, 'кегля', 'кегли', 'кеглей')}"
 
 
 def _winner_compliment(names: list[str]) -> str:

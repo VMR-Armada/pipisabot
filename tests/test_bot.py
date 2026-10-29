@@ -34,6 +34,7 @@ from pipisa.texts import (
     battlecup_result,
     battlecup_round,
     bowling_score,
+    pins_knocked,
     clear_disabled,
     clear_enabled,
     duel_refusal,
@@ -104,7 +105,14 @@ class TextTests(unittest.TestCase):
         self.assertNotIn("Борис, шар", text)
 
     def test_bowling_score_names_the_pins(self) -> None:
-        self.assertEqual(bowling_score(1), "мимо, 0 кеглей")
+        self.assertEqual(pins_knocked(1), 0)
+        self.assertEqual(pins_knocked(2), 1)
+        self.assertEqual(pins_knocked(3), 3)
+        self.assertEqual(pins_knocked(4), 4)
+        self.assertEqual(pins_knocked(5), 5)
+        self.assertEqual(pins_knocked(6), 6)
+        self.assertEqual(bowling_score(0), "мимо, 0 кеглей")
+        self.assertEqual(bowling_score(1), "1 кегля")
         self.assertEqual(bowling_score(2), "2 кегли")
         self.assertEqual(bowling_score(4), "4 кегли")
         self.assertEqual(bowling_score(5), "5 кеглей")

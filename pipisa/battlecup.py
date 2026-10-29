@@ -10,7 +10,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from pipisa.db import Battlecup, Database
 from pipisa.telegram_errors import call_after_flood, notice_with_cause, tell_user
-from pipisa.texts import battlecup_announce, battlecup_result, battlecup_round, escape_name
+from pipisa.texts import battlecup_announce, battlecup_result, battlecup_round, escape_name, pins_knocked
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +154,7 @@ async def play_battlecup(bot: Bot, db: Database, cup: Battlecup) -> None:
                 thrown = await call_after_flood(lambda: bot.send_dice(cup.chat_id, emoji=BOWLING))
                 if thrown.dice is None:
                     raise RuntimeError("Telegram не вернул результат боулинга")
-                round_rolls[player.user_id] = thrown.dice.value
+                round_rolls[player.user_id] = pins_knocked(thrown.dice.value)
                 pending_ids.extend((label.message_id, thrown.message_id))
             await asyncio.sleep(DICE_PAUSE)
             for user_id, value in round_rolls.items():
