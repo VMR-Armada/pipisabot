@@ -17,13 +17,13 @@ NAME_TOP = HEIGHT - 56
 PLOT_ROOM = NAME_TOP - TOP_LIMIT - 20
 
 
-def render_top(rows: list[tuple[str, int]]) -> bytes:
+def render_top(rows: list[tuple[str, int]], *, title: str = "ТОП 10") -> bytes:
     image = Image.new("RGB", (WIDTH, HEIGHT), BG)
     draw = ImageDraw.Draw(image)
     title_font = _font(28, bold=True)
     size_font = _font(22, bold=True)
     name_font = _font(18)
-    draw.text((MARGIN, 32), "ТОП 10", font=title_font, fill=PINK)
+    draw.text((MARGIN, 32), title, font=title_font, fill=PINK)
 
     count = len(rows)
     if count == 0:

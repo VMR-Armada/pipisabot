@@ -231,6 +231,38 @@ async def cmd_global(message: Message, db: Database) -> None:
     )
 
 
+@router.message(Command("global_top_pic"))
+async def cmd_global_top_pic(message: Message, db: Database) -> None:
+    if message.from_user is None or message.from_user.is_bot:
+        return
+    if _is_group(message):
+        await db.touch_chat(message.chat.id, message.chat.title)
+        await _claim(message, db)
+    entries, standing = await db.global_top(
+        message.from_user.id,
+        message.chat.id if _is_group(message) else None,
+    )
+    if not entries:
+        await message.reply("Пока пусто. Первый замер — команда /dick.")
+        return
+    try:
+        png = render_top(
+            [(entry.first_name or "Игрок", entry.size) for entry in entries],
+            title="ГЛОБАЛЬНЫЙ ТОП",
+        )
+    except Exception:
+        logger.exception("Не удалось собрать картинку глобального топа")
+        await message.reply(
+            top_message(
+                "Глобальный топ 10",
+                _rows(entries, with_chat=True, show_username=False),
+                _standing(standing),
+            )
+        )
+        return
+    await message.reply_photo(BufferedInputFile(png, filename="global_top.png"))
+
+
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, db: Database) -> None:
     if message.from_user is None or message.from_user.is_bot:

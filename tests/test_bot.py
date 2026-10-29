@@ -683,6 +683,17 @@ class CardTests(unittest.TestCase):
         self.assertEqual(len(heights), 2)
         self.assertAlmostEqual(heights[0] / heights[1], 2, delta=0.08)
 
+    def test_global_top_picture_keeps_the_same_scale(self) -> None:
+        rows = [("Анна", 20), ("Борис", 10)]
+        chat = render_top(rows)
+        global_pic = render_top(rows, title="ГЛОБАЛЬНЫЙ ТОП")
+        self.assertNotEqual(chat, global_pic)
+        image = Image.open(BytesIO(global_pic))
+        self.assertEqual(image.size, (1200, 680))
+        heights = _mint_heights(image)
+        self.assertEqual(len(heights), 2)
+        self.assertAlmostEqual(heights[0] / heights[1], 2, delta=0.08)
+
     def test_cyrillic_glyphs(self) -> None:
         font = _font(40, bold=True)
         cyrillic = bytes(font.getmask("ЛИНЕЙКА"))
