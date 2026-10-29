@@ -24,7 +24,7 @@ GROUP_COMMANDS = [
     BotCommand(command="stats", description="Статистика картинкой"),
     BotCommand(command="duel", description="Вызвать ответом или по нику"),
     BotCommand(command="ffa", description="Открытый вызов, принять может любой"),
-    BotCommand(command="battlecup", description="Турнир на боулинге, взнос 2 см"),
+    BotCommand(command="battlecup", description="5 бросков, старт через 10 минут"),
     BotCommand(command="clear", description="Удалять сообщения бота через N минут"),
     BotCommand(command="help", description="Как играть"),
 ]

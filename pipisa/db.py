@@ -953,8 +953,8 @@ class Database:
 
     async def finish_battlecup(self, battlecup_id: int, rolls: dict[int, int]) -> BattlecupOutcome | None:
         for roll in rolls.values():
-            if not 1 <= roll <= 6:
-                raise ValueError("В боулинге может выпасть только число от 1 до 6")
+            if not 1 <= roll <= 30:
+                raise ValueError("Сумма бросков должна быть от 1 до 30")
         async with self._lock:
             try:
                 cup = await self._battlecup(battlecup_id)

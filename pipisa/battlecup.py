@@ -9,14 +9,29 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from pipisa.db import Battlecup, Database
-from pipisa.texts import battlecup_announce, battlecup_result, escape_name
+from pipisa.texts import battlecup_announce, battlecup_result, battlecup_round, escape_name
 
 logger = logging.getLogger(__name__)
 
 STAKE = 2
 MIN_MINUTES = 1
 MAX_MINUTES = 24 * 60
+DEFAULT_MINUTES = 10
+THROWS = 5
 BOWLING = "🎳"
+DICE_PAUSE = 4
+
+
+def parse_battlecup_minutes(args: str | None) -> int | None:
+    token = (args or "").strip()
+    if not token:
+        return DEFAULT_MINUTES
+    if not token.isdigit() or len(token) > 4:
+        return None
+    minutes = int(token)
+    if not MIN_MINUTES <= minutes <= MAX_MINUTES:
+        return None
+    return minutes
 
 
 def countdown_seconds(starts_at: int, now: int) -> int:
@@ -88,19 +103,43 @@ async def play_battlecup(bot: Bot, db: Database, cup: Battlecup) -> None:
         await _edit_or_send(bot, cup, text)
         return
     await _edit_or_send(bot, cup, "🏆 Набор закрыт. Бросаем шары.")
+    scoreboard_id: int | None = None
+    pending_ids: list[int] = []
     try:
-        rolls: dict[int, int] = {}
-        for player in cup.players:
-            name = escape_name(player.first_name, player.username, player.user_id)
-            await bot.send_message(cup.chat_id, f"Шар {name}")
-            thrown = await bot.send_dice(cup.chat_id, emoji=BOWLING)
-            if thrown.dice is None:
-                raise RuntimeError("Telegram не вернул результат боулинга")
-            rolls[player.user_id] = thrown.dice.value
-        await asyncio.sleep(4)
-        outcome = await db.finish_battlecup(cup.id, rolls)
+        totals = {player.user_id: 0 for player in cup.players}
+        for index in range(1, THROWS + 1):
+            pending_ids = []
+            round_rolls: dict[int, int] = {}
+            header = await bot.send_message(cup.chat_id, f"🎳 Бросок {index} из {THROWS}")
+            pending_ids.append(header.message_id)
+            for player in cup.players:
+                name = escape_name(player.first_name, player.username, player.user_id)
+                label = await bot.send_message(cup.chat_id, name)
+                thrown = await bot.send_dice(cup.chat_id, emoji=BOWLING)
+                if thrown.dice is None:
+                    raise RuntimeError("Telegram не вернул результат боулинга")
+                round_rolls[player.user_id] = thrown.dice.value
+                pending_ids.extend((label.message_id, thrown.message_id))
+            await asyncio.sleep(DICE_PAUSE)
+            for user_id, value in round_rolls.items():
+                totals[user_id] += value
+            rows = [
+                (
+                    escape_name(player.first_name, player.username, player.user_id),
+                    round_rolls[player.user_id],
+                    totals[player.user_id],
+                )
+                for player in cup.players
+            ]
+            rows.sort(key=lambda item: (-item[2], item[0]))
+            text = battlecup_round(throw_index=index, throw_count=THROWS, rows=rows)
+            scoreboard_id = await _show_scoreboard(bot, cup.chat_id, scoreboard_id, text)
+            await _delete_messages(bot, cup.chat_id, pending_ids)
+            pending_ids = []
+        outcome = await db.finish_battlecup(cup.id, totals)
     except Exception:
         logger.exception("Не удалось доиграть баттлкап %s", cup.id)
+        await _delete_messages(bot, cup.chat_id, pending_ids)
         refunded = await db.refund_battlecup(cup.id)
         if refunded is not None:
             await bot.send_message(cup.chat_id, "Броски не удались. Взносы вернулись.")
@@ -109,6 +148,25 @@ async def play_battlecup(bot: Bot, db: Database, cup: Battlecup) -> None:
         await bot.send_message(cup.chat_id, "Этот баттлкап уже посчитан.")
         return
     await bot.send_message(cup.chat_id, battlecup_result(outcome))
+
+
+async def _show_scoreboard(bot: Bot, chat_id: int, message_id: int | None, text: str) -> int:
+    if message_id is not None:
+        try:
+            await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id)
+            return message_id
+        except TelegramBadRequest:
+            logger.info("Не смог обновить промежуточный итог баттлкапа")
+    sent = await bot.send_message(chat_id, text)
+    return sent.message_id
+
+
+async def _delete_messages(bot: Bot, chat_id: int, message_ids: list[int]) -> None:
+    for message_id in message_ids:
+        try:
+            await bot.delete_message(chat_id, message_id)
+        except TelegramBadRequest:
+            logger.info("Не смог удалить бросок %s в чате %s", message_id, chat_id)
 
 
 async def _edit_or_send(bot: Bot, cup: Battlecup, text: str) -> None:

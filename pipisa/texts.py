@@ -18,7 +18,7 @@ HELP_TEXT = (
     "/stats — карточка статистики\n"
     "/duel — дуэль на кубиках: ответом на сообщение или через /duel @ник. Вызов можно отменить, пока его не приняли\n"
     "/ffa — открытый вызов: принять может любой, кто уже делал замер\n"
-    "/battlecup 5 — турнир через 5 минут. Кнопка «Присоединиться» ставит 2 см, победителя выбирает боулинг\n"
+    "/battlecup — турнир через 10 минут, можно указать свои: /battlecup 5. Пять общих бросков, банк забирает большая сумма\n"
     "/clear 20 — удалять сообщения бота старше 20 минут. Непринятые дуэли и объявление баттлкапа остаются, пока они не закрыты\n"
     "/help — эта справка"
 )
@@ -172,7 +172,7 @@ def battlecup_announce(*, starts_in: int, stake: int, names: list[str]) -> str:
         "🏆 <b>Баттлкап</b>",
         f"Старт через {format_wait(starts_in)}.",
         f"Взнос <b>{format_cm(stake)}</b>. Сейчас в банке <b>{format_cm(pool)}</b>.",
-        "Каждый бросает шар для боулинга. У кого результат выше, тот забирает банк. "
+        "Каждый делает 5 бросков вместе с остальными. У кого сумма выше, тот забирает банк. "
         "Если первых мест несколько, банк делится поровну.",
     ]
     if names:
@@ -232,12 +232,20 @@ def _last_place_taunt(names: list[str]) -> str:
     return random.choice(pool)
 
 
+def battlecup_round(*, throw_index: int, throw_count: int, rows: list[tuple[str, int, int]]) -> str:
+    lines = [f"🎳 <b>Бросок {throw_index} из {throw_count}</b>"]
+    for name, roll, total in rows:
+        lines.append(f"{name}: <b>{bowling_score(roll)}</b>, всего {total}")
+    return "\n".join(lines)
+
+
 def battlecup_result(outcome: BattlecupOutcome) -> str:
     lines = [f"🏆 Банк <b>{format_cm(outcome.pool)}</b>."]
-    for payout in outcome.payouts:
+    ordered = sorted(outcome.payouts, key=lambda payout: (-payout.roll, payout.user_id))
+    for payout in ordered:
         name = escape_name(payout.first_name, payout.username, payout.user_id)
         lines.append(
-            f"{name}: <b>{bowling_score(payout.roll)}</b>, сейчас <b>{format_cm(payout.size)}</b>"
+            f"{name}: сумма <b>{payout.roll}</b>, сейчас <b>{format_cm(payout.size)}</b>"
         )
     winners = [payout for payout in outcome.payouts if payout.prize > 0]
     lines.append("")

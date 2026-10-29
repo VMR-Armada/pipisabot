@@ -20,7 +20,14 @@ from aiogram.types import (
     User,
 )
 
-from pipisa.battlecup import MAX_MINUTES, MIN_MINUTES, STAKE, announcement_text, join_keyboard
+from pipisa.battlecup import (
+    MAX_MINUTES,
+    MIN_MINUTES,
+    STAKE,
+    announcement_text,
+    join_keyboard,
+    parse_battlecup_minutes,
+)
 from pipisa.cleanup import CLEAR_MAX_MINUTES, CLEAR_MIN_MINUTES
 from pipisa.db import Database, Entry, Standing
 from pipisa.stats_card import CardData, render_stats
@@ -522,9 +529,12 @@ async def cmd_battlecup(message: Message, command: CommandObject, db: Database) 
     if not _is_group(message):
         await message.answer(GROUP_ONLY)
         return
-    minutes = _battlecup_minutes(command.args)
-    if minutes is None or not MIN_MINUTES <= minutes <= MAX_MINUTES:
-        await message.reply(f"Напиши длительность в минутах, от {MIN_MINUTES} до {MAX_MINUTES}: /battlecup 5")
+    minutes = parse_battlecup_minutes(command.args)
+    if minutes is None:
+        await message.reply(
+            f"Напиши длительность в минутах, от {MIN_MINUTES} до {MAX_MINUTES}: /battlecup 5. "
+            "Без числа старт через 10 минут."
+        )
         return
     starts_at = int(time.time()) + minutes * 60
     battlecup_id = await db.create_battlecup(chat_id=message.chat.id, stake=STAKE, starts_at=starts_at)

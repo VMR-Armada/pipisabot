@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from pipisa.battlecup import countdown_seconds
+from pipisa.battlecup import countdown_seconds, parse_battlecup_minutes
 from pipisa.day import next_midnight
 
 from pipisa.db import BattlecupOutcome, BattlecupPayout, Database, Entry, play_streaks, prize_shares
@@ -18,6 +18,7 @@ from pipisa.handlers import _rows
 from pipisa.stats_card import CardData, _font, render_stats
 from pipisa.texts import (
     battlecup_result,
+    battlecup_round,
     bowling_score,
     clear_disabled,
     clear_enabled,
@@ -81,9 +82,9 @@ class TextTests(unittest.TestCase):
         )
         with patch("pipisa.texts.random.choice", side_effect=lambda pool: pool[0]):
             text = battlecup_result(outcome)
-        self.assertIn("Анна: <b>страйк, 6 кеглей</b>", text)
-        self.assertIn("Борис: <b>3 кегли</b>", text)
-        self.assertIn("Вова: <b>мимо, 0 кеглей</b>", text)
+        self.assertIn("Анна: сумма <b>6</b>", text)
+        self.assertIn("Борис: сумма <b>3</b>", text)
+        self.assertIn("Вова: сумма <b>1</b>", text)
         self.assertIn("Анна, кегли сегодня были на твоей стороне.", text)
         self.assertIn("Вова, шар увидел кегли и сделал вид, что их нет.", text)
         self.assertNotIn("Борис, шар", text)
@@ -113,6 +114,23 @@ class TextTests(unittest.TestCase):
         self.assertEqual(countdown_seconds(start + 300, start + 60), 240)
         self.assertEqual(countdown_seconds(start + 300, start + 299), 60)
         self.assertEqual(countdown_seconds(start + 300, start + 300), 0)
+
+    def test_battlecup_without_minutes_starts_in_ten(self) -> None:
+        self.assertEqual(parse_battlecup_minutes(None), 10)
+        self.assertEqual(parse_battlecup_minutes("  "), 10)
+        self.assertEqual(parse_battlecup_minutes("5"), 5)
+        self.assertIsNone(parse_battlecup_minutes("0"))
+        self.assertIsNone(parse_battlecup_minutes("скоро"))
+
+    def test_battlecup_round_lists_the_throw_and_total(self) -> None:
+        text = battlecup_round(
+            throw_index=1,
+            throw_count=5,
+            rows=[("Анна", 6, 6), ("Борис", 3, 3)],
+        )
+        self.assertIn("Бросок 1 из 5", text)
+        self.assertIn("Анна: <b>страйк, 6 кеглей</b>, всего 6", text)
+        self.assertIn("Борис: <b>3 кегли</b>, всего 3", text)
 
     def test_wait(self) -> None:
         self.assertEqual(format_wait(30), "меньше минуты")
