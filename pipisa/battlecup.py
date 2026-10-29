@@ -9,7 +9,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from pipisa.db import Battlecup, Database
-from pipisa.telegram_errors import notice_with_cause, tell_user
+from pipisa.telegram_errors import call_after_flood, notice_with_cause, tell_user
 from pipisa.texts import battlecup_announce, battlecup_result, battlecup_round, escape_name
 
 logger = logging.getLogger(__name__)
@@ -141,14 +141,16 @@ async def play_battlecup(bot: Bot, db: Database, cup: Battlecup) -> None:
             round_started = time.monotonic()
             pending_ids = []
             round_rolls: dict[int, int] = {}
-            header = await bot.send_message(cup.chat_id, f"🎳 Бросок {index} из {THROWS}")
+            header = await call_after_flood(
+                lambda: bot.send_message(cup.chat_id, f"🎳 Бросок {index} из {THROWS}")
+            )
             pending_ids.append(header.message_id)
             for offset, player in enumerate(cup.players):
                 if offset:
                     await asyncio.sleep(THROW_GAP)
                 name = escape_name(player.first_name, player.username, player.user_id)
-                label = await bot.send_message(cup.chat_id, name)
-                thrown = await bot.send_dice(cup.chat_id, emoji=BOWLING)
+                label = await call_after_flood(lambda: bot.send_message(cup.chat_id, name))
+                thrown = await call_after_flood(lambda: bot.send_dice(cup.chat_id, emoji=BOWLING))
                 if thrown.dice is None:
                     raise RuntimeError("Telegram не вернул результат боулинга")
                 round_rolls[player.user_id] = thrown.dice.value
@@ -193,18 +195,20 @@ async def play_battlecup(bot: Bot, db: Database, cup: Battlecup) -> None:
 async def _show_scoreboard(bot: Bot, chat_id: int, message_id: int | None, text: str) -> int:
     if message_id is not None:
         try:
-            await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id)
+            await call_after_flood(
+                lambda: bot.edit_message_text(text, chat_id=chat_id, message_id=message_id)
+            )
             return message_id
         except TelegramBadRequest:
             logger.info("Не смог обновить промежуточный итог баттлкапа")
-    sent = await bot.send_message(chat_id, text)
+    sent = await call_after_flood(lambda: bot.send_message(chat_id, text))
     return sent.message_id
 
 
 async def _delete_messages(bot: Bot, chat_id: int, message_ids: list[int]) -> None:
     for message_id in message_ids:
         try:
-            await bot.delete_message(chat_id, message_id)
+            await call_after_flood(lambda message_id=message_id: bot.delete_message(chat_id, message_id))
         except TelegramAPIError:
             logger.info("Не смог удалить бросок %s в чате %s", message_id, chat_id)
 
@@ -220,13 +224,15 @@ async def _send_or_report(bot: Bot, chat_id: int, text: str) -> None:
 async def _edit_or_send(bot: Bot, cup: Battlecup, text: str) -> None:
     if cup.message_id is not None:
         try:
-            await bot.edit_message_text(
-                text,
-                chat_id=cup.chat_id,
-                message_id=cup.message_id,
-                reply_markup=None,
+            await call_after_flood(
+                lambda: bot.edit_message_text(
+                    text,
+                    chat_id=cup.chat_id,
+                    message_id=cup.message_id,
+                    reply_markup=None,
+                )
             )
             return
         except TelegramBadRequest:
             logger.info("Не смог обновить сообщение баттлкапа %s", cup.id)
-    await bot.send_message(cup.chat_id, text)
+    await call_after_flood(lambda: bot.send_message(cup.chat_id, text))

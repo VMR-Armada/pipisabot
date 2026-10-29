@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
 
 from aiogram import Bot
 from aiogram.exceptions import (
@@ -20,6 +22,17 @@ from pipisa.texts import plural
 logger = logging.getLogger(__name__)
 
 _MAX_PAUSE = 180
+_Result = TypeVar("_Result")
+
+
+async def call_after_flood(operation: Callable[[], Awaitable[_Result]]) -> _Result:
+    while True:
+        try:
+            return await operation()
+        except TelegramRetryAfter as error:
+            pause = _pause(error)
+            logger.info("Telegram ограничил отправку, повтор через %s с", pause)
+            await asyncio.sleep(pause)
 
 
 def describe_telegram_error(error: BaseException) -> str | None:

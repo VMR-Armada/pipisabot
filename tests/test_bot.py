@@ -13,10 +13,19 @@ from PIL import Image
 
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
-from pipisa.battlecup import countdown_seconds, parse_battlecup_minutes, round_pause
+from pipisa.battlecup import countdown_seconds, parse_battlecup_minutes, play_battlecup, round_pause
 from pipisa.day import next_midnight
 
-from pipisa.db import BattlecupOutcome, BattlecupPayout, Database, Entry, play_streaks, prize_shares
+from pipisa.db import (
+    Battlecup,
+    BattlecupOutcome,
+    BattlecupPayout,
+    BattlecupPlayer,
+    Database,
+    Entry,
+    play_streaks,
+    prize_shares,
+)
 from pipisa.handlers import _rows, on_telegram_error
 from pipisa.stats_card import CardData, _font, render_stats
 from pipisa.telegram_errors import delivery_target, describe_telegram_error, notice_with_cause, tell_user
@@ -780,6 +789,74 @@ class TelegramErrorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(bot.texts), 1)
         self.assertIn("chat not found", bot.texts[0])
         self.assertEqual(bot.replies, [4])
+
+    async def test_flood_during_a_round_waits_and_continues(self) -> None:
+        bot = _CupBot()
+        db = _CupDb()
+        cup = Battlecup(
+            id=1,
+            chat_id=-100,
+            status="running",
+            stake=2,
+            starts_at=0,
+            message_id=9,
+            players=[
+                BattlecupPlayer(1, "Анна", None, None),
+                BattlecupPlayer(2, "Борис", None, None),
+            ],
+        )
+        slept: list[float] = []
+
+        async def tracked_sleep(seconds: float) -> None:
+            slept.append(seconds)
+
+        with patch("asyncio.sleep", tracked_sleep):
+            await play_battlecup(bot, db, cup)
+
+        self.assertFalse(db.refunded)
+        self.assertEqual(db.totals, {1: 20, 2: 20})
+        self.assertIn(35, slept)
+        self.assertEqual(bot.dice_attempts, 11)
+
+
+class _CupDb:
+    def __init__(self) -> None:
+        self.refunded = False
+        self.totals: dict[int, int] | None = None
+
+    async def refund_battlecup(self, battlecup_id: int) -> None:
+        self.refunded = True
+
+    async def finish_battlecup(self, battlecup_id: int, totals: dict[int, int]) -> None:
+        self.totals = dict(totals)
+
+
+class _CupBot:
+    def __init__(self) -> None:
+        self.dice_attempts = 0
+        self._limited = False
+
+    async def send_message(self, chat_id: int, text: str, reply_markup: object = None) -> SimpleNamespace:
+        return SimpleNamespace(message_id=1, dice=None)
+
+    async def send_dice(self, chat_id: int, emoji: str) -> SimpleNamespace:
+        self.dice_attempts += 1
+        if self.dice_attempts == 2 and not self._limited:
+            self._limited = True
+            raise _retry_after(35)
+        return SimpleNamespace(message_id=self.dice_attempts, dice=SimpleNamespace(value=4))
+
+    async def edit_message_text(
+        self,
+        text: str,
+        chat_id: int | None = None,
+        message_id: int | None = None,
+        reply_markup: object = None,
+    ) -> None:
+        return None
+
+    async def delete_message(self, chat_id: int, message_id: int) -> None:
+        return None
 
 
 class _Method:
