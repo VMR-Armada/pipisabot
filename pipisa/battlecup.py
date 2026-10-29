@@ -139,6 +139,7 @@ async def play_battlecup(bot: Bot, db: Database, cup: Battlecup) -> None:
         totals = {player.user_id: 0 for player in cup.players}
         for index in range(1, THROWS + 1):
             round_started = time.monotonic()
+            await _delete_messages(bot, cup.chat_id, pending_ids)
             pending_ids = []
             round_rolls: dict[int, int] = {}
             header = await call_after_flood(
@@ -174,10 +175,10 @@ async def play_battlecup(bot: Bot, db: Database, cup: Battlecup) -> None:
                 following=index < THROWS,
             )
             scoreboard_id = await _show_scoreboard(bot, cup.chat_id, scoreboard_id, text)
-            await _delete_messages(bot, cup.chat_id, pending_ids)
-            pending_ids = []
             if index < THROWS:
                 await asyncio.sleep(round_pause(time.monotonic() - round_started))
+        await _delete_messages(bot, cup.chat_id, pending_ids)
+        pending_ids = []
         outcome = await db.finish_battlecup(cup.id, totals)
     except Exception as error:
         logger.exception("Не удалось доиграть баттлкап %s", cup.id)
