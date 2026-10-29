@@ -13,7 +13,7 @@ from PIL import Image
 
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
-from pipisa.battlecup import countdown_seconds, parse_battlecup_minutes
+from pipisa.battlecup import countdown_seconds, parse_battlecup_minutes, round_pause
 from pipisa.day import next_midnight
 
 from pipisa.db import BattlecupOutcome, BattlecupPayout, Database, Entry, play_streaks, prize_shares
@@ -136,6 +136,20 @@ class TextTests(unittest.TestCase):
         self.assertIn("Бросок 1 из 5", text)
         self.assertIn("Анна: <b>страйк, 6 кеглей</b>, всего 6", text)
         self.assertIn("Борис: <b>3 кегли</b>, всего 3", text)
+        self.assertNotIn("Следующий бросок", text)
+        following = battlecup_round(
+            throw_index=1,
+            throw_count=5,
+            rows=[("Анна", 6, 6)],
+            following=True,
+        )
+        self.assertIn("Следующий бросок через минуту.", following)
+
+    def test_battlecup_rounds_start_a_minute_apart(self) -> None:
+        self.assertEqual(round_pause(0), 60)
+        self.assertEqual(round_pause(6), 54)
+        self.assertEqual(round_pause(60), 0)
+        self.assertEqual(round_pause(75), 0)
 
     def test_wait(self) -> None:
         self.assertEqual(format_wait(30), "меньше минуты")

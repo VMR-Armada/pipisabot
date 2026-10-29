@@ -22,6 +22,11 @@ THROWS = 5
 BOWLING = "🎳"
 THROW_GAP = 1
 DICE_PAUSE = 4
+ROUND_GAP = 60
+
+
+def round_pause(elapsed: float) -> float:
+    return max(0.0, ROUND_GAP - elapsed)
 
 
 def parse_battlecup_minutes(args: str | None) -> int | None:
@@ -63,19 +68,38 @@ def join_keyboard(battlecup_id: int) -> InlineKeyboardMarkup:
 async def watch_battlecups(bot: Bot, db: Database) -> None:
     await db.requeue_running_battlecups(int(time.time()))
     shown_minute: dict[int, int] = {}
-    while True:
-        try:
-            now = int(time.time())
-            await refresh_countdowns(bot, db, shown_minute, now)
-            due = await db.claim_due_battlecups(now)
-            for cup in due:
-                shown_minute.pop(cup.id, None)
-                await play_battlecup(bot, db, cup)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Не удалось проверить баттлкапы")
-        await asyncio.sleep(1)
+    playing: set[asyncio.Task[None]] = set()
+
+    def retire(task: asyncio.Task[None]) -> None:
+        playing.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error("Баттлкап завершился с ошибкой", exc_info=error)
+
+    try:
+        while True:
+            try:
+                now = int(time.time())
+                await refresh_countdowns(bot, db, shown_minute, now)
+                due = await db.claim_due_battlecups(now)
+                for cup in due:
+                    shown_minute.pop(cup.id, None)
+                    task = asyncio.create_task(play_battlecup(bot, db, cup))
+                    playing.add(task)
+                    task.add_done_callback(retire)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Не удалось проверить баттлкапы")
+            await asyncio.sleep(1)
+    finally:
+        tasks = tuple(playing)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def refresh_countdowns(bot: Bot, db: Database, shown_minute: dict[int, int], now: int) -> None:
@@ -114,6 +138,7 @@ async def play_battlecup(bot: Bot, db: Database, cup: Battlecup) -> None:
         await _edit_or_send(bot, cup, "🏆 Набор закрыт. Бросаем шары.")
         totals = {player.user_id: 0 for player in cup.players}
         for index in range(1, THROWS + 1):
+            round_started = time.monotonic()
             pending_ids = []
             round_rolls: dict[int, int] = {}
             header = await bot.send_message(cup.chat_id, f"🎳 Бросок {index} из {THROWS}")
@@ -140,10 +165,17 @@ async def play_battlecup(bot: Bot, db: Database, cup: Battlecup) -> None:
                 for player in cup.players
             ]
             rows.sort(key=lambda item: (-item[2], item[0]))
-            text = battlecup_round(throw_index=index, throw_count=THROWS, rows=rows)
+            text = battlecup_round(
+                throw_index=index,
+                throw_count=THROWS,
+                rows=rows,
+                following=index < THROWS,
+            )
             scoreboard_id = await _show_scoreboard(bot, cup.chat_id, scoreboard_id, text)
             await _delete_messages(bot, cup.chat_id, pending_ids)
             pending_ids = []
+            if index < THROWS:
+                await asyncio.sleep(round_pause(time.monotonic() - round_started))
         outcome = await db.finish_battlecup(cup.id, totals)
     except Exception as error:
         logger.exception("Не удалось доиграть баттлкап %s", cup.id)

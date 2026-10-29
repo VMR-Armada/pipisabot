@@ -20,7 +20,7 @@ HELP_TEXT = (
     "/stats — карточка статистики\n"
     "/duel — дуэль на кубиках: ответом на сообщение или через /duel @ник. Вызов можно отменить, пока его не приняли\n"
     "/ffa — открытый вызов: принять может любой, кто уже делал замер\n"
-    "/battlecup — турнир через 10 минут, можно указать свои: /battlecup 5. Пять бросков по очереди, банк забирает большая сумма\n"
+    "/battlecup — турнир через 10 минут, можно указать свои: /battlecup 5. Пять бросков по очереди, между раундами минута, банк забирает большая сумма\n"
     "/clear 20 — удалять сообщения бота старше 20 минут. Непринятые дуэли и объявление баттлкапа остаются, пока они не закрыты\n"
     "/help — эта справка"
 )
@@ -174,7 +174,7 @@ def battlecup_announce(*, starts_in: int, stake: int, names: list[str]) -> str:
         "🏆 <b>Баттлкап</b>",
         f"Старт через {format_wait(starts_in)}.",
         f"Взнос <b>{format_cm(stake)}</b>. Сейчас в банке <b>{format_cm(pool)}</b>.",
-        "Каждый делает 5 бросков по очереди. У кого сумма выше, тот забирает банк. "
+        "Каждый делает 5 бросков по очереди, следующий раунд через минуту. У кого сумма выше, тот забирает банк. "
         "Если первых мест несколько, банк делится поровну.",
     ]
     if names:
@@ -234,10 +234,18 @@ def _last_place_taunt(names: list[str]) -> str:
     return random.choice(pool)
 
 
-def battlecup_round(*, throw_index: int, throw_count: int, rows: list[tuple[str, int, int]]) -> str:
+def battlecup_round(
+    *,
+    throw_index: int,
+    throw_count: int,
+    rows: list[tuple[str, int, int]],
+    following: bool = False,
+) -> str:
     lines = [f"🎳 <b>Бросок {throw_index} из {throw_count}</b>"]
     for name, roll, total in rows:
         lines.append(f"{name}: <b>{bowling_score(roll)}</b>, всего {total}")
+    if following:
+        lines.append("Следующий бросок через минуту.")
     return "\n".join(lines)
 
 
