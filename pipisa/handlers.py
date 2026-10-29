@@ -31,6 +31,7 @@ from pipisa.battlecup import (
 from pipisa.cleanup import CLEAR_MAX_MINUTES, CLEAR_MIN_MINUTES
 from pipisa.db import Database, Entry, Standing
 from pipisa.stats_card import CardData, render_stats
+from pipisa.top_card import render_top
 from pipisa.texts import (
     GROUP_ONLY,
     HELP_TEXT,
@@ -180,6 +181,34 @@ async def cmd_top(message: Message, db: Database) -> None:
         first_name=first_name,
     )
     await message.reply(top_message("Топ 10 этого чата", _rows(entries, with_chat=False), _standing(standing)))
+
+
+@router.message(Command("top10_pics"))
+async def cmd_top_pics(message: Message, db: Database) -> None:
+    if message.from_user is None or message.from_user.is_bot:
+        return
+    if not _is_group(message):
+        await message.answer(GROUP_ONLY)
+        return
+    await db.touch_chat(message.chat.id, message.chat.title)
+    await _claim(message, db)
+    user_id, username, first_name = _person(message)
+    entries, standing = await db.chat_top(
+        message.chat.id,
+        user_id,
+        username=username,
+        first_name=first_name,
+    )
+    if not entries:
+        await message.reply("Пока пусто. Первый замер — команда /dick.")
+        return
+    try:
+        png = render_top([(entry.first_name or "Игрок", entry.size) for entry in entries])
+    except Exception:
+        logger.exception("Не удалось собрать картинку топа")
+        await message.reply(top_message("Топ 10 этого чата", _rows(entries, with_chat=False), _standing(standing)))
+        return
+    await message.reply_photo(BufferedInputFile(png, filename="top.png"))
 
 
 @router.message(Command("global_top"))

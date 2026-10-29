@@ -16,6 +16,7 @@ from pipisa.day import next_midnight
 from pipisa.db import BattlecupOutcome, BattlecupPayout, Database, Entry, play_streaks, prize_shares
 from pipisa.handlers import _rows
 from pipisa.stats_card import CardData, _font, render_stats
+from pipisa.top_card import render_top
 from pipisa.texts import (
     battlecup_result,
     battlecup_round,
@@ -662,12 +663,55 @@ class CardTests(unittest.TestCase):
         self.assertGreater(len(png), 5000)
         self.assertGreater(Image.open(BytesIO(png)).height, 900)
 
+    def test_top_picture(self) -> None:
+        png = render_top(
+            [
+                ("Анна", 30),
+                ("Борис", 18),
+                ("Виктор", 4),
+                ("Глеб", 0),
+                ("Дина", -6),
+            ]
+        )
+        self.assertTrue(png.startswith(b"\x89PNG"))
+        image = Image.open(BytesIO(png))
+        self.assertEqual(image.size, (1200, 680))
+
+    def test_top_picture_heights_follow_the_sizes(self) -> None:
+        image = Image.open(BytesIO(render_top([("Анна", 20), ("Борис", 10)])))
+        heights = _mint_heights(image)
+        self.assertEqual(len(heights), 2)
+        self.assertAlmostEqual(heights[0] / heights[1], 2, delta=0.08)
+
     def test_cyrillic_glyphs(self) -> None:
         font = _font(40, bold=True)
         cyrillic = bytes(font.getmask("ЛИНЕЙКА"))
         missing = bytes(font.getmask("\ue000"))
         self.assertNotEqual(cyrillic, missing)
         self.assertGreater(sum(cyrillic), 0)
+
+
+def _mint_heights(image: Image.Image) -> list[int]:
+    pixels = image.load()
+    assert pixels is not None
+    columns = []
+    for x in range(image.width):
+        span = 0
+        for y in range(image.height):
+            if pixels[x, y][:3] == (72, 214, 180):
+                span += 1
+        columns.append(span)
+    heights = []
+    current = 0
+    for span in columns:
+        if span:
+            current = max(current, span)
+        elif current:
+            heights.append(current)
+            current = 0
+    if current:
+        heights.append(current)
+    return heights
 
 
 if __name__ == "__main__":

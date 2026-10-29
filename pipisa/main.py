@@ -20,6 +20,7 @@ from pipisa.handlers import router
 GROUP_COMMANDS = [
     BotCommand(command="dick", description="Сделать замер"),
     BotCommand(command="top_dick", description="Топ 10 этого чата"),
+    BotCommand(command="top10_pics", description="Топ 10 картинкой"),
     BotCommand(command="global_top", description="Глобальный топ 10"),
     BotCommand(command="stats", description="Статистика картинкой"),
     BotCommand(command="duel", description="Вызвать ответом или по нику"),
