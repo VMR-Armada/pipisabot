@@ -19,7 +19,7 @@ HELP_TEXT = (
     "/duel — дуэль на кубиках: ответом на сообщение или через /duel @ник. Вызов можно отменить, пока его не приняли\n"
     "/ffa — открытый вызов: принять может любой, кто уже делал замер\n"
     "/battlecup 5 — турнир через 5 минут. Кнопка «Присоединиться» ставит 2 см, победителя выбирает боулинг\n"
-    "/clear 20 — удалять сообщения бота старше 20 минут. Непринятые дуэли и долгий набор баттлкапа остаются\n"
+    "/clear 20 — удалять сообщения бота старше 20 минут. Непринятые дуэли и объявление баттлкапа остаются, пока они не закрыты\n"
     "/help — эта справка"
 )
 
@@ -275,7 +275,7 @@ def clear_enabled(minutes: int) -> str:
     return (
         f"Буду удалять свои сообщения старше {_older_than_minutes(minutes)}.\n"
         "Непринятые дуэли оставлю, пока их не закроют. "
-        "Баттлкап с набором дольше этого срока тоже не трону, пока идёт сбор."
+        "Объявление баттлкапа тоже оставлю, пока он не начался."
     )
 
 
@@ -386,7 +386,7 @@ def stats_fallback(
     duel_ties: int,
     cup_wins: int,
     cup_played: int,
-    rivals: list[tuple[str, int, int, int]],
+    rivals: list[tuple[str, int, int, int, int]],
     next_free_text: str,
 ) -> str:
     safe = html.escape(name)
@@ -406,9 +406,9 @@ def stats_fallback(
     ]
     if rivals:
         lines.append("Счёт с соперниками:")
-        for rival_name, wins, losses, ties in rivals[:8]:
+        for rival_name, wins, losses, ties, net in rivals[:8]:
             score = f"{wins}–{losses}" + (f"–{ties}" if ties else "")
-            lines.append(f"• {html.escape(rival_name)} — {score}")
+            lines.append(f"• {html.escape(rival_name)} — {score} ({format_signed_cm(net)})")
         if len(rivals) > 8:
             lines.append(f"и ещё {len(rivals) - 8}")
     lines.append(next_free_text)

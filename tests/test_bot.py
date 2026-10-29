@@ -13,7 +13,7 @@ from PIL import Image
 from pipisa.battlecup import countdown_seconds
 from pipisa.day import next_midnight
 
-from pipisa.db import BattlecupOutcome, BattlecupPayout, Database, Entry, prize_shares
+from pipisa.db import BattlecupOutcome, BattlecupPayout, Database, Entry, play_streaks, prize_shares
 from pipisa.handlers import _rows
 from pipisa.stats_card import CardData, _font, render_stats
 from pipisa.texts import (
@@ -100,6 +100,11 @@ class TextTests(unittest.TestCase):
         self.assertIn("старше 1 минуты", clear_enabled(1))
         self.assertIn("старше 21 минуты", clear_enabled(21))
         self.assertIn("больше не удаляю", clear_disabled())
+
+    def test_play_streaks_sum_until_zero_or_the_opposite_sign(self) -> None:
+        self.assertEqual(play_streaks([5, 3, 7, 0]), (15, 0))
+        self.assertEqual(play_streaks([-2, -4, -1, 5]), (5, -7))
+        self.assertEqual(play_streaks([2, 2, -1, 9, 0, -3]), (9, -3))
 
     def test_battlecup_countdown_steps_once_a_minute(self) -> None:
         start = 1_000
@@ -239,6 +244,25 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats.worst_loss, 0)
         self.assertEqual(stats.plays, 2)
 
+    async def test_stats_use_growth_streaks(self) -> None:
+        rolls = [5, 3, 7, 0, -2, -4, 1]
+        for delta in rolls:
+            grown = await self.db.try_grow(
+                user_id=1,
+                chat_id=-100,
+                username="ann",
+                first_name="Анна",
+                chat_title="Чат",
+                rng=lambda value=delta: value,
+            )
+            self.assertTrue(grown.ok)
+            self.now = next_midnight(self.now, self.zone)
+        stats = await self.db.get_stats(1, -100)
+        assert stats is not None
+        self.assertEqual(stats.best_gain, 15)
+        self.assertEqual(stats.worst_loss, -6)
+        self.assertEqual(stats.deltas, rolls)
+
     async def test_import_keeps_size_until_next_grow(self) -> None:
         applied, pending = await self.db.import_sizes(
             chat_id=-100,
@@ -316,10 +340,10 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         assert winner is not None and loser is not None
         self.assertEqual(winner.duel_wins, 1)
         self.assertEqual(winner.contests, [("duel", 4)])
-        self.assertEqual(winner.rivals, [("Борис", 1, 0, 0)])
+        self.assertEqual(winner.rivals, [("Борис", 1, 0, 0, 4)])
         self.assertEqual(loser.duel_losses, 1)
         self.assertEqual(loser.contests, [("duel", -4)])
-        self.assertEqual(loser.rivals, [("Анна", 0, 1, 0)])
+        self.assertEqual(loser.rivals, [("Анна", 0, 1, 0, -4)])
         self.assertIsNone(await self.db.apply_duel(duel_id, 6, 2))
 
         tie_id = await self.db.create_duel(chat_id=-100, challenger_id=2, opponent_id=1)
@@ -473,8 +497,8 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         winner = await self.db.get_stats(1, -100)
         loser = await self.db.get_stats(2, -100)
         assert winner is not None and loser is not None
-        self.assertEqual(winner.rivals, [("Борис", 1, 0, 0)])
-        self.assertEqual(loser.rivals, [("Анна", 0, 1, 0)])
+        self.assertEqual(winner.rivals, [("Борис", 1, 0, 0, 4)])
+        self.assertEqual(loser.rivals, [("Анна", 0, 1, 0, -4)])
 
     async def test_ffa_duel_is_open_until_someone_accepts(self) -> None:
         await self.db.set_size(
@@ -531,14 +555,18 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         await self.db.track_message(-100, 4)
         due = set(await self.db.due_bot_messages(self.now))
         self.assertIn((-100, 1), due)
-        self.assertIn((-200, 5), due)
+        self.assertNotIn((-200, 5), due)
         self.assertNotIn((-100, 2), due)
         self.assertNotIn((-100, 3), due)
         self.assertNotIn((-100, 4), due)
 
         self.assertTrue(await self.db.claim_duel(duel_id, 2))
+        started_cups = await self.db.claim_due_battlecups(self.now)
+        self.assertEqual([cup.id for cup in started_cups], [short_id])
         due = set(await self.db.due_bot_messages(self.now))
         self.assertIn((-100, 2), due)
+        self.assertIn((-200, 5), due)
+        self.assertNotIn((-100, 3), due)
 
         await self.db.set_clear_minutes(-100, None)
         due = set(await self.db.due_bot_messages(self.now))
@@ -609,7 +637,7 @@ class CardTests(unittest.TestCase):
                 cup_wins=1,
                 cup_played=2,
                 contests=(("duel", 4), ("battlecup", -2), ("duel", 0)),
-                rivals=(("Борис", 2, 1, 0), ("Виктор", 0, 1, 1)),
+                rivals=(("Борис", 2, 1, 0, 6), ("Виктор", 0, 1, 1, -3)),
             )
         )
         self.assertTrue(png.startswith(b"\x89PNG"))

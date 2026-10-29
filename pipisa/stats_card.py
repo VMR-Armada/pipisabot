@@ -37,7 +37,7 @@ class CardData:
     cup_wins: int = 0
     cup_played: int = 0
     contests: tuple[tuple[str, int], ...] = ()
-    rivals: tuple[tuple[str, int, int, int], ...] = ()
+    rivals: tuple[tuple[str, int, int, int, int], ...] = ()
 
 
 def render_stats(data: CardData) -> bytes:
@@ -152,12 +152,6 @@ def _draw_contests(
         draw.text((left + 16, top + 68), note, font=label_font, fill=MUTED)
     if not data.contests:
         draw.text((48, 840), "Дуэлей и баттлкапов пока нет", font=text_font, fill=MUTED)
-        return
-    recent = []
-    for kind, delta in data.contests:
-        title = "дуэль" if kind == "duel" else "кубок"
-        recent.append(f"{title} {format_signed_cm(delta)}")
-    draw.text((48, 840), _truncate(draw, "   ".join(recent), text_font, 900), font=text_font, fill=WHITE)
 
 
 def _card_size(data: CardData) -> tuple[int, int]:
@@ -165,16 +159,16 @@ def _card_size(data: CardData) -> tuple[int, int]:
     if shown == 0:
         return 1000, 900
     lines = shown + (1 if len(data.rivals) > 5 else 0)
-    return 1000, 900 + 28 + 34 * lines
+    return 1000, 848 + 38 + 34 * lines + 24
 
 
 def _draw_rivals(draw: ImageDraw.ImageDraw, data: CardData, font: ImageFont.ImageFont) -> None:
     if not data.rivals:
         return
-    draw.text((48, 888), "Счёт с соперниками", font=font, fill=MUTED)
-    y = 926
-    for name, wins, losses, ties in data.rivals[:5]:
-        score = _duel_score(wins, losses, ties)
+    draw.text((48, 848), "Счёт с соперниками", font=font, fill=MUTED)
+    y = 886
+    for name, wins, losses, ties, net in data.rivals[:5]:
+        score = _duel_score(wins, losses, ties, net)
         color = MINT if wins > losses else PINK if losses > wins else WHITE
         score_width = draw.textlength(score, font=font)
         label = _truncate(draw, name, font, 860 - int(score_width))
@@ -186,11 +180,11 @@ def _draw_rivals(draw: ImageDraw.ImageDraw, data: CardData, font: ImageFont.Imag
         draw.text((48, y), f"и ещё {rest}", font=font, fill=MUTED)
 
 
-def _duel_score(wins: int, losses: int, ties: int) -> str:
+def _duel_score(wins: int, losses: int, ties: int, net: int) -> str:
     score = f"{wins}–{losses}"
     if ties:
         score += f"–{ties}"
-    return score
+    return f"{score} ({format_signed_cm(net)})"
 
 
 _FONT_DIR = Path(__file__).resolve().parent / "fonts"

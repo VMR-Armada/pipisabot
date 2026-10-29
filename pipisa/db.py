@@ -120,7 +120,7 @@ class Stats:
     duel_ties: int
     cup_wins: int
     cup_played: int
-    rivals: list[tuple[str, int, int, int]]
+    rivals: list[tuple[str, int, int, int, int]]
     first_name: str
     username: str | None
     chat_title: str | None
@@ -363,13 +363,12 @@ class Database:
                 """
                 SELECT delta FROM plays
                 WHERE user_id = ? AND chat_id = ?
-                ORDER BY id DESC
-                LIMIT 12
+                ORDER BY id
                 """,
                 (user_id, chat_id),
             )
-            deltas = [int(item["delta"]) for item in await cursor.fetchall()]
-            deltas.reverse()
+            all_deltas = [int(item["delta"]) for item in await cursor.fetchall()]
+            best_gain, worst_loss = play_streaks(all_deltas)
             contests = await self._contest_rows(user_id, chat_id)
             summary = _contest_summary(contests)
             last_played = await self._last_played_at(user_id, chat_id)
@@ -380,10 +379,10 @@ class Database:
                 rank=standing.rank,
                 total=standing.total,
                 plays=int(row["plays"]),
-                best_gain=int(row["best_gain"]),
-                worst_loss=int(row["worst_loss"]),
+                best_gain=best_gain,
+                worst_loss=worst_loss,
                 next_free_at=available_at,
-                deltas=deltas,
+                deltas=all_deltas[-12:],
                 contests=[(kind, delta) for kind, delta, _place in contests[-6:]],
                 duel_wins=summary[0],
                 duel_losses=summary[1],
@@ -1171,9 +1170,7 @@ class Database:
                   AND NOT (
                     m.kind = 'battlecup' AND EXISTS (
                         SELECT 1 FROM battlecups b
-                        WHERE b.id = m.ref_id
-                          AND b.status = 'pending'
-                          AND (b.starts_at - m.created_at) > c.minutes * 60
+                        WHERE b.id = m.ref_id AND b.status = 'pending'
                     )
                   )
                 """,
@@ -1232,7 +1229,7 @@ class Database:
         if "opponent_id" not in columns:
             await self.conn.execute("ALTER TABLE contest_results ADD COLUMN opponent_id INTEGER")
 
-    async def _duel_rivals(self, user_id: int, chat_id: int) -> list[tuple[str, int, int, int]]:
+    async def _duel_rivals(self, user_id: int, chat_id: int) -> list[tuple[str, int, int, int, int]]:
         cursor = await self.conn.execute(
             """
             SELECT
@@ -1240,7 +1237,8 @@ class Database:
                 MAX(COALESCE(NULLIF(p.first_name, ''), 'Игрок')) AS name,
                 SUM(CASE WHEN c.place = 1 THEN 1 ELSE 0 END) AS wins,
                 SUM(CASE WHEN c.place = 2 THEN 1 ELSE 0 END) AS losses,
-                SUM(CASE WHEN c.place = 0 THEN 1 ELSE 0 END) AS ties
+                SUM(CASE WHEN c.place = 0 THEN 1 ELSE 0 END) AS ties,
+                SUM(c.delta) AS net
             FROM contest_results c
             LEFT JOIN players p
                 ON p.user_id = c.opponent_id AND p.chat_id = c.chat_id
@@ -1251,7 +1249,7 @@ class Database:
             (user_id, chat_id),
         )
         return [
-            (row["name"], int(row["wins"]), int(row["losses"]), int(row["ties"]))
+            (row["name"], int(row["wins"]), int(row["losses"]), int(row["ties"]), int(row["net"]))
             for row in await cursor.fetchall()
         ]
 
@@ -1566,6 +1564,26 @@ class Database:
         if row is None or row["size"] is None:
             return None
         return Standing(rank=int(row["rank"]), total=int(row["total"]), size=int(row["size"]))
+
+
+def play_streaks(deltas: list[int]) -> tuple[int, int]:
+    best = 0
+    worst = 0
+    run = 0
+    sign = 0
+    for delta in deltas:
+        if delta > 0:
+            run = delta if sign != 1 else run + delta
+            sign = 1
+            best = max(best, run)
+        elif delta < 0:
+            run = delta if sign != -1 else run + delta
+            sign = -1
+            worst = min(worst, run)
+        else:
+            run = 0
+            sign = 0
+    return best, worst
 
 
 def contest_places(rolls: dict[int, int]) -> dict[int, int]:
