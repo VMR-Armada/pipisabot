@@ -5,10 +5,11 @@ import logging
 import time
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from pipisa.db import Battlecup, Database
+from pipisa.telegram_errors import notice_with_cause, tell_user
 from pipisa.texts import battlecup_announce, battlecup_result, battlecup_round, escape_name
 
 logger = logging.getLogger(__name__)
@@ -92,21 +93,25 @@ async def refresh_countdowns(bot: Bot, db: Database, shown_minute: dict[int, int
                 message_id=cup.message_id,
                 reply_markup=join_keyboard(cup.id),
             )
-        except TelegramBadRequest as error:
+        except TelegramAPIError as error:
             if "message is not modified" not in str(error).lower():
-                logger.info("Не смог обновить таймер баттлкапа %s", cup.id)
+                logger.info("Не смог обновить таймер баттлкапа %s: %s", cup.id, error)
 
 
 async def play_battlecup(bot: Bot, db: Database, cup: Battlecup) -> None:
     if len(cup.players) < 2:
         refunded = await db.refund_battlecup(cup.id)
         text = "Не набралось двоих. Взносы вернулись." if refunded and refunded.players else "Не набралось двоих."
-        await _edit_or_send(bot, cup, text)
+        try:
+            await _edit_or_send(bot, cup, text)
+        except TelegramAPIError as error:
+            logger.info("Не смог закрыть набор баттлкапа %s", cup.id)
+            await tell_user(bot, cup.chat_id, notice_with_cause(text, error), error)
         return
-    await _edit_or_send(bot, cup, "🏆 Набор закрыт. Бросаем шары.")
     scoreboard_id: int | None = None
     pending_ids: list[int] = []
     try:
+        await _edit_or_send(bot, cup, "🏆 Набор закрыт. Бросаем шары.")
         totals = {player.user_id: 0 for player in cup.players}
         for index in range(1, THROWS + 1):
             pending_ids = []
@@ -140,17 +145,17 @@ async def play_battlecup(bot: Bot, db: Database, cup: Battlecup) -> None:
             await _delete_messages(bot, cup.chat_id, pending_ids)
             pending_ids = []
         outcome = await db.finish_battlecup(cup.id, totals)
-    except Exception:
+    except Exception as error:
         logger.exception("Не удалось доиграть баттлкап %s", cup.id)
         await _delete_messages(bot, cup.chat_id, pending_ids)
         refunded = await db.refund_battlecup(cup.id)
-        if refunded is not None:
-            await bot.send_message(cup.chat_id, "Броски не удались. Взносы вернулись.")
+        lead = "Броски не удались. Взносы вернулись." if refunded is not None else "Броски не удались."
+        await tell_user(bot, cup.chat_id, notice_with_cause(lead, error), error)
         return
     if outcome is None:
-        await bot.send_message(cup.chat_id, "Этот баттлкап уже посчитан.")
+        await _send_or_report(bot, cup.chat_id, "Этот баттлкап уже посчитан.")
         return
-    await bot.send_message(cup.chat_id, battlecup_result(outcome))
+    await _send_or_report(bot, cup.chat_id, battlecup_result(outcome))
 
 
 async def _show_scoreboard(bot: Bot, chat_id: int, message_id: int | None, text: str) -> int:
@@ -168,8 +173,16 @@ async def _delete_messages(bot: Bot, chat_id: int, message_ids: list[int]) -> No
     for message_id in message_ids:
         try:
             await bot.delete_message(chat_id, message_id)
-        except TelegramBadRequest:
+        except TelegramAPIError:
             logger.info("Не смог удалить бросок %s в чате %s", message_id, chat_id)
+
+
+async def _send_or_report(bot: Bot, chat_id: int, text: str) -> None:
+    try:
+        await bot.send_message(chat_id, text)
+    except TelegramAPIError as error:
+        logger.info("Не смог отправить итог баттлкапа в чат %s", chat_id)
+        await tell_user(bot, chat_id, notice_with_cause(text, error), error)
 
 
 async def _edit_or_send(bot: Bot, cup: Battlecup, text: str) -> None:

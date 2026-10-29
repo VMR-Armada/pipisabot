@@ -8,8 +8,8 @@ import time
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.filters import Command, CommandObject, CommandStart, ExceptionTypeFilter
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
@@ -18,6 +18,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
     User,
+    ErrorEvent,
 )
 
 from pipisa.battlecup import (
@@ -31,6 +32,7 @@ from pipisa.battlecup import (
 from pipisa.cleanup import CLEAR_MAX_MINUTES, CLEAR_MIN_MINUTES
 from pipisa.db import Database, Entry, Standing
 from pipisa.stats_card import CardData, render_stats
+from pipisa.telegram_errors import delivery_target, describe_telegram_error, notice_with_cause, tell_user
 from pipisa.top_card import render_top
 from pipisa.texts import (
     GROUP_ONLY,
@@ -552,10 +554,18 @@ async def _play_duel(message: Message, db: Database, duel_id: int) -> None:
             raise RuntimeError("Telegram не вернул значение кубика")
         await asyncio.sleep(4)
         outcome = await db.apply_duel(duel_id, first.dice.value, second.dice.value)
-    except Exception:
+    except Exception as error:
         logger.exception("Не удалось доиграть дуэль %s", duel_id)
         await db.release_duel(duel_id)
-        await message.answer("Кубики не бросились. Вызов снова можно принять.")
+        if message.bot is None:
+            return
+        await tell_user(
+            message.bot,
+            message.chat.id,
+            notice_with_cause("Кубики не бросились. Вызов снова можно принять.", error),
+            error,
+            reply_to=message.message_id,
+        )
         return
     if outcome is None:
         await message.answer("Эта дуэль уже посчитана.")
@@ -678,5 +688,17 @@ async def bot_added(event: ChatMemberUpdated, bot: Bot) -> None:
         return
     try:
         await bot.send_message(event.chat.id, HELP_TEXT)
-    except TelegramBadRequest:
+    except TelegramAPIError as error:
         logger.info("Не смог поздороваться в чате %s", event.chat.id)
+        await tell_user(bot, event.chat.id, notice_with_cause(HELP_TEXT, error), error)
+
+
+@router.error(ExceptionTypeFilter(TelegramAPIError))
+async def on_telegram_error(event: ErrorEvent, bot: Bot) -> None:
+    notice = describe_telegram_error(event.exception)
+    target = delivery_target(event.update)
+    logger.warning("Команда получила ошибку Telegram: %s", event.exception)
+    if notice is None or target is None:
+        return
+    chat_id, reply_to = target
+    await tell_user(bot, chat_id, notice, event.exception, reply_to=reply_to)

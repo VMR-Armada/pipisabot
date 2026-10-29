@@ -4,18 +4,22 @@ from io import BytesIO
 import sqlite3
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from datetime import timezone
 from pathlib import Path
 
 from PIL import Image
 
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+
 from pipisa.battlecup import countdown_seconds, parse_battlecup_minutes
 from pipisa.day import next_midnight
 
 from pipisa.db import BattlecupOutcome, BattlecupPayout, Database, Entry, play_streaks, prize_shares
-from pipisa.handlers import _rows
+from pipisa.handlers import _rows, on_telegram_error
 from pipisa.stats_card import CardData, _font, render_stats
+from pipisa.telegram_errors import delivery_target, describe_telegram_error, notice_with_cause, tell_user
 from pipisa.top_card import render_top
 from pipisa.texts import (
     battlecup_result,
@@ -700,6 +704,86 @@ class CardTests(unittest.TestCase):
         missing = bytes(font.getmask("\ue000"))
         self.assertNotEqual(cyrillic, missing)
         self.assertGreater(sum(cyrillic), 0)
+
+
+class TelegramErrorTests(unittest.IsolatedAsyncioTestCase):
+    def test_flood_text_includes_the_wait_and_telegram_reason(self) -> None:
+        error = _retry_after(35)
+        text = describe_telegram_error(error)
+        self.assertIsNotNone(text)
+        assert text is not None
+        self.assertIn("35 секунд", text)
+        self.assertIn("Too Many Requests: retry after 35", text)
+
+    def test_bad_request_text_includes_telegram_reason(self) -> None:
+        error = TelegramBadRequest(_Method(), "Bad Request: message is not modified")
+        text = describe_telegram_error(error)
+        self.assertIsNotNone(text)
+        assert text is not None
+        self.assertIn("Telegram не принял запрос", text)
+        self.assertIn("message is not modified", text)
+
+    def test_other_errors_stay_without_telegram_text(self) -> None:
+        self.assertIsNone(describe_telegram_error(RuntimeError("кубик")))
+        self.assertEqual(notice_with_cause("Кубики не бросились.", RuntimeError("кубик")), "Кубики не бросились.")
+
+    def test_delivery_target_uses_the_command_message(self) -> None:
+        update = SimpleNamespace(
+            message=SimpleNamespace(chat=SimpleNamespace(id=-100), message_id=7),
+            edited_message=None,
+            channel_post=None,
+            callback_query=None,
+            my_chat_member=None,
+            chat_member=None,
+        )
+        self.assertEqual(delivery_target(update), (-100, 7))
+
+    async def test_flood_notice_waits_before_the_first_send(self) -> None:
+        bot = _RecordingBot()
+        slept: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            slept.append(seconds)
+
+        with patch("pipisa.telegram_errors.asyncio.sleep", fake_sleep):
+            sent = await tell_user(bot, -100, "Броски не удались. Взносы вернулись.", _retry_after(35))
+        self.assertTrue(sent)
+        self.assertEqual(slept, [35])
+        self.assertEqual(bot.texts, ["Броски не удались. Взносы вернулись."])
+
+    async def test_command_error_is_delivered_to_the_chat(self) -> None:
+        bot = _RecordingBot()
+        update = SimpleNamespace(
+            message=SimpleNamespace(chat=SimpleNamespace(id=-100), message_id=4),
+            edited_message=None,
+            channel_post=None,
+            callback_query=None,
+            my_chat_member=None,
+            chat_member=None,
+        )
+        event = SimpleNamespace(exception=TelegramBadRequest(_Method(), "Bad Request: chat not found"), update=update)
+        await on_telegram_error(event, bot)
+        self.assertEqual(len(bot.texts), 1)
+        self.assertIn("chat not found", bot.texts[0])
+        self.assertEqual(bot.replies, [4])
+
+
+class _Method:
+    chat_id = -100
+
+
+class _RecordingBot:
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+        self.replies: list[int | None] = []
+
+    async def send_message(self, chat_id: int, text: str, reply_to_message_id: int | None = None) -> None:
+        self.texts.append(text)
+        self.replies.append(reply_to_message_id)
+
+
+def _retry_after(seconds: int) -> TelegramRetryAfter:
+    return TelegramRetryAfter(_Method(), f"Too Many Requests: retry after {seconds}", seconds)
 
 
 def _mint_heights(image: Image.Image) -> list[int]:
