@@ -19,6 +19,7 @@ MAX_MINUTES = 24 * 60
 DEFAULT_MINUTES = 10
 THROWS = 5
 BOWLING = "🎳"
+THROW_GAP = 1
 DICE_PAUSE = 4
 
 
@@ -112,7 +113,9 @@ async def play_battlecup(bot: Bot, db: Database, cup: Battlecup) -> None:
             round_rolls: dict[int, int] = {}
             header = await bot.send_message(cup.chat_id, f"🎳 Бросок {index} из {THROWS}")
             pending_ids.append(header.message_id)
-            for player in cup.players:
+            for offset, player in enumerate(cup.players):
+                if offset:
+                    await asyncio.sleep(THROW_GAP)
                 name = escape_name(player.first_name, player.username, player.user_id)
                 label = await bot.send_message(cup.chat_id, name)
                 thrown = await bot.send_dice(cup.chat_id, emoji=BOWLING)
