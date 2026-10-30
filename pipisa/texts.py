@@ -5,6 +5,8 @@ import random
 from datetime import datetime, timezone, tzinfo
 from typing import TYPE_CHECKING
 
+from pipisa.db import Measure
+
 if TYPE_CHECKING:
     from pipisa.db import BattlecupOutcome, DayReport, DuelOutcome, PeriodReview
 
@@ -270,10 +272,11 @@ def darts_round(
     return "\n".join(lines)
 
 
-def day_text(report: DayReport) -> str:
+def day_text(report: DayReport, *, week: bool = False) -> str:
     lines = ["Замеры:"]
-    if report.measures:
-        for measure in report.measures:
+    measures = _summed_measures(report.measures) if week else report.measures
+    if measures:
+        for measure in measures:
             lines.append(f"{_safe(measure.name)} {_measure_change(measure.delta)}")
     else:
         lines.append("нет")
@@ -299,6 +302,21 @@ def day_text(report: DayReport) -> str:
             word = plural(dart.wins, "победа", "победы", "побед")
             lines.append(f"{_safe(dart.name)} {dart.wins} {word} (суммарный банк {dart.bank} см)")
     return "\n".join(lines)
+
+
+def _summed_measures(measures: tuple[Measure, ...]) -> tuple[Measure, ...]:
+    order: list[int | str] = []
+    totals: dict[int | str, list[str | int]] = {}
+    for measure in measures:
+        key: int | str = measure.user_id or measure.name
+        row = totals.get(key)
+        if row is None:
+            order.append(key)
+            row = [measure.name, 0]
+            totals[key] = row
+        row[0] = measure.name
+        row[1] = int(row[1]) + measure.delta
+    return tuple(Measure(str(totals[key][0]), int(totals[key][1]), 0, 0) for key in order)
 
 
 def _measure_change(delta: int) -> str:

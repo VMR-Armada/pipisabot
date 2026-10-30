@@ -100,6 +100,7 @@ class Measure:
     delta: int
     size_after: int
     played_at: int
+    user_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -969,6 +970,7 @@ class Database:
                     int(row["delta"]),
                     int(row["size_after"]),
                     int(row["played_at"]),
+                    int(row["user_id"]),
                 )
                 for row in await cursor.fetchall()
             )

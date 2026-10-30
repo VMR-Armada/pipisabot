@@ -357,7 +357,7 @@ async def _send_report(message: Message, db: Database, *, week: bool) -> None:
     await db.touch_chat(message.chat.id, message.chat.title)
     await _claim(message, db)
     report = await db.chat_day(message.chat.id, week=week)
-    parts = split_html(day_text(report))
+    parts = split_html(day_text(report, week=week))
     await message.reply(parts[0])
     for part in parts[1:]:
         await message.answer(part)

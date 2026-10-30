@@ -252,6 +252,23 @@ class TextTests(unittest.TestCase):
         self.assertIn("Дуэли:\nнет", empty)
         self.assertIn("Баттлкапы:\nнет", empty)
 
+        summed = day_text(
+            DayReport(
+                measures=(
+                    Measure("Анна", 4, 4, 1, user_id=1),
+                    Measure("Анна", 10, 14, 2, user_id=1),
+                    Measure("Борис", -3, 12, 3, user_id=2),
+                ),
+                duels=(),
+                cups=(),
+            ),
+            week=True,
+        )
+        self.assertIn("Анна + 14 см", summed)
+        self.assertIn("Борис - 3 см", summed)
+        self.assertNotIn("Анна + 4 см", summed)
+        self.assertLess(summed.index("Анна"), summed.index("Борис"))
+
     def test_day_duels_keep_a_personal_score(self) -> None:
         scores = _day_duels(
             [
