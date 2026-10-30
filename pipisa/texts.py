@@ -26,7 +26,8 @@ HELP_TEXT = (
     "/duel — дуэль на кубиках: ответом на сообщение или через /duel @ник. Вызов можно отменить, пока его не приняли\n"
     "/ffa — открытый вызов: принять может любой, кто уже делал замер\n"
     "/battlecup — турнир через 10 минут, можно указать свои: /battlecup 5. Пять бросков по очереди, между раундами минута, банк забирает большая сумма\n"
-    "/clear 20 — удалять сообщения бота старше 20 минут. Непринятые дуэли и объявление баттлкапа остаются, пока они не закрыты\n"
+    "/darts — то же, что баттлкап, но броски дротика: мимо 0, кольца 1–4, яблочко 5\n"
+    "/clear 20 — удалять сообщения бота старше 20 минут. Непринятые дуэли и объявления баттлкапа и дартса остаются, пока они не закрыты\n"
     "/help — эта справка"
 )
 
@@ -210,6 +211,65 @@ def bowling_score(pins: int) -> str:
     return f"{pins} {plural(pins, 'кегля', 'кегли', 'кеглей')}"
 
 
+_DARTS = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
+_DART_RINGS = {
+    1: "внешнее кольцо",
+    2: "второе кольцо",
+    3: "третье кольцо",
+    4: "внутреннее кольцо",
+}
+
+
+def dart_points(value: int) -> int:
+    try:
+        return _DARTS[value]
+    except KeyError:
+        raise ValueError("У дротика может выпасть только число от 1 до 6") from None
+
+
+def dart_score(points: int) -> str:
+    if points >= 5:
+        return "яблочко, 5 очков"
+    if points <= 0:
+        return "мимо, 0 очков"
+    ring = _DART_RINGS[points]
+    return f"{ring}, {points} {plural(points, 'очко', 'очка', 'очков')}"
+
+
+def darts_announce(*, starts_in: int, stake: int, names: list[str]) -> str:
+    pool = stake * len(names)
+    lines = [
+        "🎯 <b>Дартс</b>",
+        f"Старт через {format_wait(starts_in)}.",
+        f"Взнос <b>{format_cm(stake)}</b>. Сейчас в банке <b>{format_cm(pool)}</b>.",
+        "Каждый делает 5 бросков дротика по очереди, следующий раунд через минуту. "
+        "Мимо — 0, кольца — от 1 до 4, яблочко — 5. У кого сумма выше, тот забирает банк. "
+        "Если первых мест несколько, банк делится поровну.",
+    ]
+    if names:
+        lines.append("")
+        lines.append("Уже в игре:")
+        lines.extend(f"• {name}" for name in names)
+    else:
+        lines.append("Пока никто не поставил. Нужны двое.")
+    return "\n".join(lines)
+
+
+def darts_round(
+    *,
+    throw_index: int,
+    throw_count: int,
+    rows: list[tuple[str, int, int]],
+    following: bool = False,
+) -> str:
+    lines = [f"🎯 <b>Бросок {throw_index} из {throw_count}</b>"]
+    for name, roll, total in rows:
+        lines.append(f"{name}: <b>{dart_score(roll)}</b>, всего {total}")
+    if following:
+        lines.append("Следующий бросок через минуту.")
+    return "\n".join(lines)
+
+
 def day_text(report: DayReport) -> str:
     lines = ["Замеры:"]
     if report.measures:
@@ -233,6 +293,11 @@ def day_text(report: DayReport) -> str:
             lines.append(f"{_safe(cup.name)} {cup.wins} {word} (суммарный банк {cup.bank} см)")
     else:
         lines.append("нет")
+    if report.darts:
+        lines.append("Дартс:")
+        for dart in report.darts:
+            word = plural(dart.wins, "победа", "победы", "побед")
+            lines.append(f"{_safe(dart.name)} {dart.wins} {word} (суммарный банк {dart.bank} см)")
     return "\n".join(lines)
 
 
@@ -373,6 +438,45 @@ def _safe(name: str) -> str:
     return html.escape(name.strip() or "Игрок")
 
 
+def _dart_winner(names: list[str]) -> str:
+    if len(names) == 1:
+        name = names[0]
+        pool = (
+            f"{name}, мишень сегодня была на твоей стороне.",
+            f"{name} забирает банк так, будто иначе и быть не могло.",
+            f"Красивый бросок, {name}.",
+            f"{name}, яблочко тебя узнало.",
+            f"Банк нашёл, кого хотел: {name}.",
+        )
+    else:
+        listed = ", ".join(names)
+        pool = (
+            f"{listed} делят первое место. Мишень не смогла выбрать одного.",
+            f"Банк на нескольких руках: {listed}. Справедливо и немного обидно.",
+            f"{listed}, бросок один на всех. Славу тоже делите.",
+        )
+    return random.choice(pool)
+
+
+def _dart_last(names: list[str]) -> str:
+    if len(names) == 1:
+        name = names[0]
+        pool = (
+            f"{name}, дротик сегодня искал стену.",
+            f"Последнее место у {name}. Взнос ушёл на чужой праздник.",
+            f"{name} сегодня спонсор победителя.",
+            f"{name} закрывает таблицу. Снизу.",
+        )
+    else:
+        listed = ", ".join(names)
+        pool = (
+            f"Последнее место делят {listed}. Редкая командная работа.",
+            f"{listed} внизу таблицы. Дротик сегодня был не в настроении.",
+            f"{listed} оплатили чужое первое место. Щедро.",
+        )
+    return random.choice(pool)
+
+
 def _winner_compliment(names: list[str]) -> str:
     if len(names) == 1:
         name = names[0]
@@ -428,7 +532,16 @@ def battlecup_round(
     return "\n".join(lines)
 
 
-def battlecup_result(outcome: BattlecupOutcome) -> str:
+def battlecup_result(
+    outcome: BattlecupOutcome,
+    *,
+    winner_line=None,
+    last_line=None,
+) -> str:
+    if winner_line is None:
+        winner_line = _winner_compliment
+    if last_line is None:
+        last_line = _last_place_taunt
     lines = [f"🏆 Банк <b>{format_cm(outcome.pool)}</b>."]
     ordered = sorted(outcome.payouts, key=lambda payout: (-payout.roll, payout.user_id))
     for payout in ordered:
@@ -452,14 +565,18 @@ def battlecup_result(outcome: BattlecupOutcome) -> str:
                 name = escape_name(payout.first_name, payout.username, payout.user_id)
                 lines.append(f"{name}: <b>{format_cm(payout.prize)}</b>")
     winner_names = [escape_name(payout.first_name, payout.username, payout.user_id) for payout in winners]
-    lines.append(_winner_compliment(winner_names))
+    lines.append(winner_line(winner_names))
     if outcome.payouts:
         worst = min(payout.roll for payout in outcome.payouts)
         last = [payout for payout in outcome.payouts if payout.roll == worst and payout.prize == 0]
         if last:
             last_names = [escape_name(payout.first_name, payout.username, payout.user_id) for payout in last]
-            lines.append(_last_place_taunt(last_names))
+            lines.append(last_line(last_names))
     return "\n".join(lines)
+
+
+def darts_result(outcome: BattlecupOutcome) -> str:
+    return battlecup_result(outcome, winner_line=_dart_winner, last_line=_dart_last)
 
 
 def _older_than_minutes(minutes: int) -> str:
@@ -472,7 +589,7 @@ def clear_enabled(minutes: int) -> str:
     return (
         f"Буду удалять свои сообщения старше {_older_than_minutes(minutes)}.\n"
         "Непринятые дуэли оставлю, пока их не закроют. "
-        "Объявление баттлкапа тоже оставлю, пока он не начался."
+        "Объявление баттлкапа и дартса тоже оставлю, пока турнир не начался."
     )
 
 

@@ -69,6 +69,7 @@ class Battlecup:
     starts_at: int
     message_id: int | None
     players: list[BattlecupPlayer]
+    kind: str = "battlecup"
 
 
 @dataclass
@@ -130,6 +131,7 @@ class DayReport:
     measures: tuple[Measure, ...]
     duels: tuple[DuelScore, ...]
     cups: tuple[CupStanding, ...]
+    darts: tuple[CupStanding, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -258,6 +260,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS battlecups (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id INTEGER NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'battlecup',
                 status TEXT NOT NULL,
                 stake INTEGER NOT NULL,
                 starts_at INTEGER NOT NULL,
@@ -313,6 +316,7 @@ class Database:
         )
         await self._ensure_nullable_duel_opponent()
         await self._ensure_contest_opponent()
+        await self._ensure_battlecup_kind()
         await self._backfill_contests()
         await self._db.commit()
 
@@ -995,54 +999,66 @@ class Database:
                 )
                 for row in await cursor.fetchall()
             ]
-            cursor = await self.conn.execute(
-                """
-                SELECT
-                    c.user_id,
-                    COALESCE(NULLIF(pl.first_name, ''), 'Игрок') AS name,
-                    c.delta,
-                    c.place,
-                    b.stake
-                FROM contest_results c
-                LEFT JOIN players pl ON pl.user_id = c.user_id AND pl.chat_id = c.chat_id
-                LEFT JOIN battlecups b ON b.id = c.source_id
-                WHERE c.chat_id = ? AND c.kind = 'battlecup' AND c.played_at >= ?
-                ORDER BY c.played_at, c.source_id, c.user_id
-                """,
-                (chat_id, since),
-            )
-            cups = [
-                (
-                    int(row["user_id"]),
-                    str(row["name"]),
-                    int(row["delta"]),
-                    int(row["place"]),
-                    0 if row["stake"] is None else int(row["stake"]),
+            boards: dict[str, tuple[CupStanding, ...]] = {}
+            for tournament in ("battlecup", "darts"):
+                cursor = await self.conn.execute(
+                    """
+                    SELECT
+                        c.user_id,
+                        COALESCE(NULLIF(pl.first_name, ''), 'Игрок') AS name,
+                        c.delta,
+                        c.place,
+                        b.stake
+                    FROM contest_results c
+                    LEFT JOIN players pl ON pl.user_id = c.user_id AND pl.chat_id = c.chat_id
+                    LEFT JOIN battlecups b ON b.id = c.source_id
+                    WHERE c.chat_id = ? AND c.kind = ? AND c.played_at >= ?
+                    ORDER BY c.played_at, c.source_id, c.user_id
+                    """,
+                    (chat_id, tournament, since),
                 )
-                for row in await cursor.fetchall()
-            ]
-        return DayReport(measures, _day_duels(duels), _day_cups(cups))
+                rows = [
+                    (
+                        int(row["user_id"]),
+                        str(row["name"]),
+                        int(row["delta"]),
+                        int(row["place"]),
+                        0 if row["stake"] is None else int(row["stake"]),
+                    )
+                    for row in await cursor.fetchall()
+                ]
+                boards[tournament] = _day_cups(rows)
+        return DayReport(measures, _day_duels(duels), boards["battlecup"], boards["darts"])
 
-    async def create_battlecup(self, *, chat_id: int, stake: int, starts_at: int) -> int | None:
+    async def create_battlecup(
+        self,
+        *,
+        chat_id: int,
+        stake: int,
+        starts_at: int,
+        kind: str = "battlecup",
+    ) -> int | None:
+        if kind not in {"battlecup", "darts"}:
+            raise ValueError("Неизвестный турнир")
         async with self._lock:
             try:
                 cursor = await self.conn.execute(
                     """
                     SELECT id FROM battlecups
-                    WHERE chat_id = ? AND status IN ('pending', 'running')
+                    WHERE chat_id = ? AND kind = ? AND status IN ('pending', 'running')
                     LIMIT 1
                     """,
-                    (chat_id,),
+                    (chat_id, kind),
                 )
                 if await cursor.fetchone() is not None:
                     await self.conn.commit()
                     return None
                 cursor = await self.conn.execute(
                     """
-                    INSERT INTO battlecups (chat_id, status, stake, starts_at, created_at)
-                    VALUES (?, 'pending', ?, ?, ?)
+                    INSERT INTO battlecups (chat_id, kind, status, stake, starts_at, created_at)
+                    VALUES (?, ?, 'pending', ?, ?, ?)
                     """,
-                    (chat_id, stake, starts_at, self._clock()),
+                    (chat_id, kind, stake, starts_at, self._clock()),
                 )
                 await self.conn.commit()
                 return int(cursor.lastrowid)
@@ -1183,7 +1199,7 @@ class Database:
                     await self._record_contest(
                         user_id=user_id,
                         chat_id=cup.chat_id,
-                        kind="battlecup",
+                        kind=cup.kind,
                         source_id=battlecup_id,
                         delta=prize - cup.stake,
                         place=places[user_id],
@@ -1268,6 +1284,7 @@ class Database:
             starts_at=int(row["starts_at"]),
             message_id=None if row["message_id"] is None else int(row["message_id"]),
             players=players,
+            kind=str(row["kind"]),
         )
 
     async def _upsert_player(
@@ -1368,7 +1385,7 @@ class Database:
                     )
                   )
                   AND NOT (
-                    m.kind = 'battlecup' AND EXISTS (
+                    m.kind IN ('battlecup', 'darts') AND EXISTS (
                         SELECT 1 FROM battlecups b
                         WHERE b.id = m.ref_id AND b.status = 'pending'
                     )
@@ -1428,6 +1445,14 @@ class Database:
         columns = {row["name"] for row in await cursor.fetchall()}
         if "opponent_id" not in columns:
             await self.conn.execute("ALTER TABLE contest_results ADD COLUMN opponent_id INTEGER")
+
+    async def _ensure_battlecup_kind(self) -> None:
+        cursor = await self.conn.execute("PRAGMA table_info(battlecups)")
+        columns = {row["name"] for row in await cursor.fetchall()}
+        if "kind" not in columns:
+            await self.conn.execute(
+                "ALTER TABLE battlecups ADD COLUMN kind TEXT NOT NULL DEFAULT 'battlecup'"
+            )
 
     async def _duel_rivals(self, user_id: int, chat_id: int) -> list[tuple[str, int, int, int, int]]:
         cursor = await self.conn.execute(
@@ -1553,7 +1578,7 @@ class Database:
         )
         cursor = await self.conn.execute(
             """
-            SELECT id, chat_id, stake, created_at FROM battlecups WHERE status = 'done'
+            SELECT id, chat_id, kind, stake, created_at FROM battlecups WHERE status = 'done'
             """
         )
         cups = await cursor.fetchall()
@@ -1574,7 +1599,7 @@ class Database:
                 await self._record_contest(
                     user_id=user_id,
                     chat_id=int(cup["chat_id"]),
-                    kind="battlecup",
+                    kind=str(cup["kind"]),
                     source_id=int(cup["id"]),
                     delta=shares.get(user_id, 0) - int(cup["stake"]),
                     place=places[user_id],

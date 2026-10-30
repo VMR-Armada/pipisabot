@@ -648,33 +648,50 @@ async def _refresh_battlecup(message: Message, db: Database, battlecup_id: int) 
 
 @router.message(Command("battlecup"))
 async def cmd_battlecup(message: Message, command: CommandObject, db: Database) -> None:
+    await _open_tournament(message, command, db, kind="battlecup")
+
+
+@router.message(Command("darts"))
+async def cmd_darts(message: Message, command: CommandObject, db: Database) -> None:
+    await _open_tournament(message, command, db, kind="darts")
+
+
+async def _open_tournament(message: Message, command: CommandObject, db: Database, *, kind: str) -> None:
     if message.from_user is None or message.from_user.is_bot:
         return
     if not _is_group(message):
         await message.answer(GROUP_ONLY)
         return
+    darts = kind == "darts"
+    title = "дартс" if darts else "баттлкап"
     minutes = parse_battlecup_minutes(command.args)
     if minutes is None:
+        command_name = "darts" if darts else "battlecup"
         await message.reply(
-            f"Напиши длительность в минутах, от {MIN_MINUTES} до {MAX_MINUTES}: /battlecup 5. "
+            f"Напиши длительность в минутах, от {MIN_MINUTES} до {MAX_MINUTES}: /{command_name} 5. "
             "Без числа старт через 10 минут."
         )
         return
     starts_at = int(time.time()) + minutes * 60
-    battlecup_id = await db.create_battlecup(chat_id=message.chat.id, stake=STAKE, starts_at=starts_at)
-    if battlecup_id is None:
-        await message.reply("В этом чате уже есть баттлкап.")
+    tournament_id = await db.create_battlecup(
+        chat_id=message.chat.id,
+        stake=STAKE,
+        starts_at=starts_at,
+        kind=kind,
+    )
+    if tournament_id is None:
+        await message.reply(f"В этом чате уже есть {title}.")
         return
-    cup = await db.get_battlecup(battlecup_id)
+    cup = await db.get_battlecup(tournament_id)
     if cup is None:
-        await message.reply("Не удалось открыть баттлкап.")
+        await message.reply(f"Не удалось открыть {title}.")
         return
     sent = await message.reply(
         announcement_text(cup, int(time.time())),
-        reply_markup=join_keyboard(battlecup_id),
+        reply_markup=join_keyboard(tournament_id),
     )
-    await db.set_battlecup_message(battlecup_id, sent.message_id)
-    await db.hold_message(sent.chat.id, sent.message_id, kind="battlecup", ref_id=battlecup_id)
+    await db.set_battlecup_message(tournament_id, sent.message_id)
+    await db.hold_message(sent.chat.id, sent.message_id, kind=kind, ref_id=tournament_id)
 
 
 @router.message(Command("clear"))

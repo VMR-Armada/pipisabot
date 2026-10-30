@@ -10,7 +10,17 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from pipisa.db import Battlecup, Database
 from pipisa.telegram_errors import call_after_flood, notice_with_cause, tell_user
-from pipisa.texts import battlecup_announce, battlecup_result, battlecup_round, escape_name, pins_knocked
+from pipisa.texts import (
+    battlecup_announce,
+    battlecup_result,
+    battlecup_round,
+    dart_points,
+    darts_announce,
+    darts_result,
+    darts_round,
+    escape_name,
+    pins_knocked,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +30,7 @@ MAX_MINUTES = 24 * 60
 DEFAULT_MINUTES = 10
 THROWS = 5
 BOWLING = "🎳"
+DART = "🎯"
 THROW_GAP = 1
 DICE_PAUSE = 4
 ROUND_GAP = 60
@@ -50,7 +61,8 @@ def countdown_seconds(starts_at: int, now: int) -> int:
 
 def announcement_text(cup: Battlecup, now: int) -> str:
     names = [escape_name(player.first_name, player.username, player.user_id) for player in cup.players]
-    return battlecup_announce(
+    announce = darts_announce if cup.kind == "darts" else battlecup_announce
+    return announce(
         starts_in=countdown_seconds(cup.starts_at, now),
         stake=cup.stake,
         names=names,
@@ -123,19 +135,27 @@ async def refresh_countdowns(bot: Bot, db: Database, shown_minute: dict[int, int
 
 
 async def play_battlecup(bot: Bot, db: Database, cup: Battlecup) -> None:
+    darts = cup.kind == "darts"
+    emoji = DART if darts else BOWLING
+    points = dart_points if darts else pins_knocked
+    round_text = darts_round if darts else battlecup_round
+    result_text = darts_result if darts else battlecup_result
+    closed = "🎯 Набор закрыт. Бросаем дротики." if darts else "🏆 Набор закрыт. Бросаем шары."
+    missing = "Telegram не вернул результат дротика" if darts else "Telegram не вернул результат боулинга"
+    label = "дартс" if darts else "баттлкап"
     if len(cup.players) < 2:
         refunded = await db.refund_battlecup(cup.id)
         text = "Не набралось двоих. Взносы вернулись." if refunded and refunded.players else "Не набралось двоих."
         try:
             await _edit_or_send(bot, cup, text)
         except TelegramAPIError as error:
-            logger.info("Не смог закрыть набор баттлкапа %s", cup.id)
+            logger.info("Не смог закрыть набор %s %s", label, cup.id)
             await tell_user(bot, cup.chat_id, notice_with_cause(text, error), error)
         return
     scoreboard_id: int | None = None
     pending_ids: list[int] = []
     try:
-        await _edit_or_send(bot, cup, "🏆 Набор закрыт. Бросаем шары.")
+        await _edit_or_send(bot, cup, closed)
         totals = {player.user_id: 0 for player in cup.players}
         for index in range(1, THROWS + 1):
             round_started = time.monotonic()
@@ -143,19 +163,19 @@ async def play_battlecup(bot: Bot, db: Database, cup: Battlecup) -> None:
             pending_ids = []
             round_rolls: dict[int, int] = {}
             header = await call_after_flood(
-                lambda: bot.send_message(cup.chat_id, f"🎳 Бросок {index} из {THROWS}")
+                lambda index=index: bot.send_message(cup.chat_id, f"{emoji} Бросок {index} из {THROWS}")
             )
             pending_ids.append(header.message_id)
             for offset, player in enumerate(cup.players):
                 if offset:
                     await asyncio.sleep(THROW_GAP)
                 name = escape_name(player.first_name, player.username, player.user_id)
-                label = await call_after_flood(lambda: bot.send_message(cup.chat_id, name))
-                thrown = await call_after_flood(lambda: bot.send_dice(cup.chat_id, emoji=BOWLING))
+                sent_name = await call_after_flood(lambda name=name: bot.send_message(cup.chat_id, name))
+                thrown = await call_after_flood(lambda: bot.send_dice(cup.chat_id, emoji=emoji))
                 if thrown.dice is None:
-                    raise RuntimeError("Telegram не вернул результат боулинга")
-                round_rolls[player.user_id] = pins_knocked(thrown.dice.value)
-                pending_ids.extend((label.message_id, thrown.message_id))
+                    raise RuntimeError(missing)
+                round_rolls[player.user_id] = points(thrown.dice.value)
+                pending_ids.extend((sent_name.message_id, thrown.message_id))
             await asyncio.sleep(DICE_PAUSE)
             for user_id, value in round_rolls.items():
                 totals[user_id] += value
@@ -168,7 +188,7 @@ async def play_battlecup(bot: Bot, db: Database, cup: Battlecup) -> None:
                 for player in cup.players
             ]
             rows.sort(key=lambda item: (-item[2], item[0]))
-            text = battlecup_round(
+            text = round_text(
                 throw_index=index,
                 throw_count=THROWS,
                 rows=rows,
@@ -181,16 +201,16 @@ async def play_battlecup(bot: Bot, db: Database, cup: Battlecup) -> None:
         pending_ids = []
         outcome = await db.finish_battlecup(cup.id, totals)
     except Exception as error:
-        logger.exception("Не удалось доиграть баттлкап %s", cup.id)
+        logger.exception("Не удалось доиграть %s %s", label, cup.id)
         await _delete_messages(bot, cup.chat_id, pending_ids)
         refunded = await db.refund_battlecup(cup.id)
         lead = "Броски не удались. Взносы вернулись." if refunded is not None else "Броски не удались."
         await tell_user(bot, cup.chat_id, notice_with_cause(lead, error), error)
         return
     if outcome is None:
-        await _send_or_report(bot, cup.chat_id, "Этот баттлкап уже посчитан.")
+        await _send_or_report(bot, cup.chat_id, f"Этот {label} уже посчитан.")
         return
-    await _send_or_report(bot, cup.chat_id, battlecup_result(outcome))
+    await _send_or_report(bot, cup.chat_id, result_text(outcome))
 
 
 async def _show_scoreboard(bot: Bot, chat_id: int, message_id: int | None, text: str) -> int:

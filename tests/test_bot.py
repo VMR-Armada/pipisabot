@@ -42,6 +42,8 @@ from pipisa.texts import (
     battlecup_result,
     battlecup_round,
     bowling_score,
+    dart_points,
+    dart_score,
     day_text,
     pins_knocked,
     review_text,
@@ -128,6 +130,14 @@ class TextTests(unittest.TestCase):
         self.assertEqual(bowling_score(4), "4 кегли")
         self.assertEqual(bowling_score(5), "5 кеглей")
         self.assertEqual(bowling_score(6), "страйк, 6 кеглей")
+
+    def test_dart_scores_rings_and_a_bullseye(self) -> None:
+        self.assertEqual([dart_points(value) for value in range(1, 7)], [0, 1, 2, 3, 4, 5])
+        self.assertEqual(dart_score(0), "мимо, 0 очков")
+        self.assertEqual(dart_score(1), "внешнее кольцо, 1 очко")
+        self.assertEqual(dart_score(2), "второе кольцо, 2 очка")
+        self.assertEqual(dart_score(4), "внутреннее кольцо, 4 очка")
+        self.assertEqual(dart_score(5), "яблочко, 5 очков")
 
     def test_period_starts_at_local_midnight_or_monday(self) -> None:
         friday = datetime(2026, 10, 30, 15, tzinfo=timezone.utc)
@@ -583,6 +593,9 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         assert future is not None
         self.assertEqual(await self.db.claim_due_battlecups(self.now), [])
         self.assertIsNone(await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=self.now))
+        darts = await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=self.now + 10_000, kind="darts")
+        self.assertIsNotNone(darts)
+        self.assertIsNone(await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=self.now, kind="darts"))
 
         self.assertEqual(await self.db.join_battlecup(future, 1), "joined")
         self.assertEqual(await self.db.join_battlecup(future, 1), "already")
@@ -1065,6 +1078,33 @@ class TelegramErrorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(35, slept)
         self.assertEqual(bot.dice_attempts, 11)
 
+    async def test_darts_scores_the_board_not_the_animation_number(self) -> None:
+        bot = _CupBot()
+        db = _CupDb()
+        cup = Battlecup(
+            id=2,
+            chat_id=-100,
+            status="running",
+            stake=2,
+            starts_at=0,
+            message_id=9,
+            players=[
+                BattlecupPlayer(1, "Анна", None, None),
+                BattlecupPlayer(2, "Борис", None, None),
+            ],
+            kind="darts",
+        )
+
+        async def tracked_sleep(_seconds: float) -> None:
+            return None
+
+        with patch("asyncio.sleep", tracked_sleep):
+            await play_battlecup(bot, db, cup)
+
+        self.assertEqual(db.totals, {1: 15, 2: 15})
+        self.assertTrue(bot.emojis)
+        self.assertTrue(all(emoji == "🎯" for emoji in bot.emojis))
+
 
 class _CupDb:
     def __init__(self) -> None:
@@ -1081,6 +1121,7 @@ class _CupDb:
 class _CupBot:
     def __init__(self) -> None:
         self.dice_attempts = 0
+        self.emojis: list[str] = []
         self._limited = False
 
     async def send_message(self, chat_id: int, text: str, reply_markup: object = None) -> SimpleNamespace:
@@ -1088,6 +1129,7 @@ class _CupBot:
 
     async def send_dice(self, chat_id: int, emoji: str) -> SimpleNamespace:
         self.dice_attempts += 1
+        self.emojis.append(emoji)
         if self.dice_attempts == 2 and not self._limited:
             self._limited = True
             raise _retry_after(35)
