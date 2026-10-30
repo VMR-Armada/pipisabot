@@ -24,6 +24,8 @@ GROUP_COMMANDS = [
     BotCommand(command="global_top", description="Глобальный топ 10"),
     BotCommand(command="global_top_pic", description="Глобальный топ картинкой"),
     BotCommand(command="stats", description="Статистика картинкой"),
+    BotCommand(command="day", description="Сухие итоги дня"),
+    BotCommand(command="week", description="Сухие итоги недели"),
     BotCommand(command="day_review", description="Шуточные итоги дня"),
     BotCommand(command="week_review", description="Шуточные итоги недели"),
     BotCommand(command="duel", description="Вызвать ответом или по нику"),

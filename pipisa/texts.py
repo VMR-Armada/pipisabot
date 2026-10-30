@@ -6,7 +6,7 @@ from datetime import datetime, timezone, tzinfo
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pipisa.db import BattlecupOutcome, DuelOutcome, PeriodReview
+    from pipisa.db import BattlecupOutcome, DayReport, DuelOutcome, PeriodReview
 
 HELP_TEXT = (
     "Я линейка — шуточная игра для групповых чатов.\n\n"
@@ -19,6 +19,8 @@ HELP_TEXT = (
     "/global_top — топ 10 по всем чатам. Размер из этого чата, если человек здесь играет\n"
     "/global_top_pic — тот же глобальный топ картинкой\n"
     "/stats — карточка статистики\n"
+    "/day — сухие итоги дня: замеры, счёт дуэлей и баттлкапы\n"
+    "/week — то же за неделю, с понедельника\n"
     "/day_review — шутливые итоги дня: каждый замер этого чата, плюс дуэли и баттлкапы\n"
     "/week_review — шутливые итоги недели в этом чате\n"
     "/duel — дуэль на кубиках: ответом на сообщение или через /duel @ник. Вызов можно отменить, пока его не приняли\n"
@@ -205,6 +207,48 @@ def bowling_score(pins: int) -> str:
     if pins <= 0:
         return "мимо, 0 кеглей"
     return f"{pins} {plural(pins, 'кегля', 'кегли', 'кеглей')}"
+
+
+def day_text(report: DayReport) -> str:
+    lines = ["Замеры:"]
+    if report.measures:
+        for measure in report.measures:
+            lines.append(f"{_safe(measure.name)} {_measure_change(measure.delta)}")
+    else:
+        lines.append("нет")
+    lines.append("Дуэли:")
+    if report.duels:
+        for duel in report.duels:
+            lines.append(
+                f"{_safe(duel.left)} {duel.left_wins}-{duel.right_wins}-{duel.ties} "
+                f"{_safe(duel.right)} ({_signed_tight(duel.left_net)})"
+            )
+    else:
+        lines.append("нет")
+    lines.append("Баттлкапы:")
+    if report.cups:
+        for cup in report.cups:
+            word = plural(cup.wins, "победа", "победы", "побед")
+            lines.append(f"{_safe(cup.name)} {cup.wins} {word} (суммарный банк {cup.bank} см)")
+    else:
+        lines.append("нет")
+    return "\n".join(lines)
+
+
+def _measure_change(delta: int) -> str:
+    if delta > 0:
+        return f"+ {delta} см"
+    if delta < 0:
+        return f"- {abs(delta)} см"
+    return "0 см"
+
+
+def _signed_tight(value: int) -> str:
+    if value > 0:
+        return f"+{value} см"
+    if value < 0:
+        return f"-{abs(value)} см"
+    return "0 см"
 
 
 def review_text(review: PeriodReview, *, week: bool, zone: tzinfo | None = None) -> str:

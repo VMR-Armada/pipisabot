@@ -22,11 +22,15 @@ from pipisa.db import (
     BattlecupPayout,
     BattlecupPlayer,
     Database,
+    DayReport,
     DuelHaul,
+    DuelScore,
+    CupStanding,
     Entry,
     Measure,
     NamedValue,
     PeriodReview,
+    _day_duels,
     play_streaks,
     prize_shares,
 )
@@ -38,6 +42,7 @@ from pipisa.texts import (
     battlecup_result,
     battlecup_round,
     bowling_score,
+    day_text,
     pins_knocked,
     review_text,
     split_html,
@@ -208,6 +213,45 @@ class TextTests(unittest.TestCase):
         self.assertGreater(len(parts), 1)
         self.assertEqual("\n".join(parts), text)
         self.assertTrue(all(len(part) <= 20 or "\n" not in part for part in parts))
+
+    def test_day_report_is_a_plain_list(self) -> None:
+        text = day_text(
+            DayReport(
+                measures=(Measure("Анна", 10, 24, 1), Measure("Борис", -3, 12, 2)),
+                duels=(DuelScore("Анна", "Борис", 2, 1, 0, 4),),
+                cups=(CupStanding("Анна", 2, 14), CupStanding("Борис", 1, 4)),
+            )
+        )
+        self.assertEqual(
+            text,
+            "\n".join(
+                [
+                    "Замеры:",
+                    "Анна + 10 см",
+                    "Борис - 3 см",
+                    "Дуэли:",
+                    "Анна 2-1-0 Борис (+4 см)",
+                    "Баттлкапы:",
+                    "Анна 2 победы (суммарный банк 14 см)",
+                    "Борис 1 победа (суммарный банк 4 см)",
+                ]
+            ),
+        )
+        empty = day_text(DayReport((), (), ()))
+        self.assertIn("Замеры:\nнет", empty)
+        self.assertIn("Дуэли:\nнет", empty)
+        self.assertIn("Баттлкапы:\nнет", empty)
+
+    def test_day_duels_keep_a_personal_score(self) -> None:
+        scores = _day_duels(
+            [
+                (1, 1, "Анна", -5, 2, 100),
+                (1, 2, "Борис", 5, 1, 100),
+                (2, 2, "Борис", 0, 0, 200),
+                (2, 1, "Анна", 0, 0, 200),
+            ]
+        )
+        self.assertEqual(scores, (DuelScore("Борис", "Анна", 1, 0, 1, 5),))
 
     def test_clear_names_the_age(self) -> None:
         self.assertIn("старше 20 минут", clear_enabled(20))
@@ -818,6 +862,52 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((week.worst_growth.name, week.worst_growth.value), ("Борис", -2))
         self.assertEqual(week.duels, 1)
         self.assertEqual(week.cups, 1)
+
+    async def test_day_lists_today_and_folds_duels(self) -> None:
+        thursday = int(datetime(2026, 10, 29, 12, tzinfo=timezone.utc).timestamp())
+        friday = int(datetime(2026, 10, 30, 12, tzinfo=timezone.utc).timestamp())
+        self.now = thursday
+        await self.db.try_grow(
+            user_id=1, chat_id=-100, username="ann", first_name="Анна", chat_title="Чат", rng=lambda: 4
+        )
+        self.now = friday
+        await self.db.try_grow(
+            user_id=1, chat_id=-100, username="ann", first_name="Анна", chat_title="Чат", rng=lambda: 10
+        )
+        await self.db.try_grow(
+            user_id=2, chat_id=-100, username="boris", first_name="Борис", chat_title="Чат", rng=lambda: -3
+        )
+        await self.db.try_grow(
+            user_id=1, chat_id=-200, username="ann", first_name="Анна", chat_title="Другой", rng=lambda: 8
+        )
+        first = await self.db.create_duel(chat_id=-100, challenger_id=1, opponent_id=2)
+        assert first is not None
+        self.assertTrue(await self.db.claim_duel(first, 2))
+        self.assertIsNotNone(await self.db.apply_duel(first, 6, 2))
+        second = await self.db.create_duel(chat_id=-100, challenger_id=2, opponent_id=1)
+        assert second is not None
+        self.assertTrue(await self.db.claim_duel(second, 1))
+        self.assertIsNotNone(await self.db.apply_duel(second, 4, 4))
+        cup_id = await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=friday)
+        assert cup_id is not None
+        self.assertEqual(await self.db.join_battlecup(cup_id, 1), "joined")
+        self.assertEqual(await self.db.join_battlecup(cup_id, 2), "joined")
+        self.assertEqual(len(await self.db.claim_due_battlecups(friday)), 1)
+        self.assertIsNotNone(await self.db.finish_battlecup(cup_id, {1: 6, 2: 1}))
+
+        report = await self.db.chat_day(-100)
+        self.assertEqual([(item.name, item.delta) for item in report.measures], [("Анна", 10), ("Борис", -3)])
+        self.assertEqual(report.duels, (DuelScore("Анна", "Борис", 1, 0, 1, 4),))
+        self.assertEqual(len(report.cups), 1)
+        self.assertEqual(report.cups[0], CupStanding("Анна", 1, 4))
+
+        week = await self.db.chat_day(-100, week=True)
+        self.assertEqual(
+            [(item.name, item.delta) for item in week.measures],
+            [("Анна", 4), ("Анна", 10), ("Борис", -3)],
+        )
+        self.assertEqual(week.duels, report.duels)
+        self.assertEqual(week.cups, report.cups)
 
 
 class CardTests(unittest.TestCase):

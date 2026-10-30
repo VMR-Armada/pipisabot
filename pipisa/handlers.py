@@ -50,6 +50,7 @@ from pipisa.texts import (
     escape_name,
     format_wait,
     grow_message,
+    day_text,
     review_text,
     split_html,
     stats_fallback,
@@ -335,6 +336,31 @@ async def cmd_stats(message: Message, db: Database) -> None:
         BufferedInputFile(png, filename="stats.png"),
         caption=free_text,
     )
+
+
+@router.message(Command("day"))
+async def cmd_day(message: Message, db: Database) -> None:
+    await _send_report(message, db, week=False)
+
+
+@router.message(Command("week"))
+async def cmd_week(message: Message, db: Database) -> None:
+    await _send_report(message, db, week=True)
+
+
+async def _send_report(message: Message, db: Database, *, week: bool) -> None:
+    if message.from_user is None or message.from_user.is_bot:
+        return
+    if not _is_group(message):
+        await message.answer(GROUP_ONLY)
+        return
+    await db.touch_chat(message.chat.id, message.chat.title)
+    await _claim(message, db)
+    report = await db.chat_day(message.chat.id, week=week)
+    parts = split_html(day_text(report))
+    await message.reply(parts[0])
+    for part in parts[1:]:
+        await message.answer(part)
 
 
 @router.message(Command("day_review"))

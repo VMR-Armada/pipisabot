@@ -109,6 +109,30 @@ class DuelHaul:
 
 
 @dataclass(frozen=True)
+class DuelScore:
+    left: str
+    right: str
+    left_wins: int
+    right_wins: int
+    ties: int
+    left_net: int
+
+
+@dataclass(frozen=True)
+class CupStanding:
+    name: str
+    wins: int
+    bank: int
+
+
+@dataclass(frozen=True)
+class DayReport:
+    measures: tuple[Measure, ...]
+    duels: tuple[DuelScore, ...]
+    cups: tuple[CupStanding, ...]
+
+
+@dataclass(frozen=True)
 class PeriodReview:
     plays: int
     play_sum: int
@@ -916,6 +940,88 @@ class Database:
                 for row in await cursor.fetchall()
             ]
         return _period_review(plays, contests)
+
+    async def chat_day(self, chat_id: int, *, week: bool = False) -> DayReport:
+        since = period_start(self._clock(), self.zone, week=week)
+        async with self._lock:
+            cursor = await self.conn.execute(
+                """
+                SELECT
+                    p.user_id,
+                    COALESCE(NULLIF(pl.first_name, ''), 'Игрок') AS name,
+                    p.delta,
+                    p.size_after,
+                    p.played_at
+                FROM plays p
+                LEFT JOIN players pl ON pl.user_id = p.user_id AND pl.chat_id = p.chat_id
+                WHERE p.chat_id = ? AND p.played_at >= ?
+                ORDER BY p.played_at, p.id
+                """,
+                (chat_id, since),
+            )
+            measures = tuple(
+                Measure(
+                    str(row["name"]),
+                    int(row["delta"]),
+                    int(row["size_after"]),
+                    int(row["played_at"]),
+                )
+                for row in await cursor.fetchall()
+            )
+            cursor = await self.conn.execute(
+                """
+                SELECT
+                    c.source_id,
+                    c.user_id,
+                    COALESCE(NULLIF(pl.first_name, ''), 'Игрок') AS name,
+                    c.delta,
+                    c.place,
+                    c.played_at
+                FROM contest_results c
+                LEFT JOIN players pl ON pl.user_id = c.user_id AND pl.chat_id = c.chat_id
+                WHERE c.chat_id = ? AND c.kind = 'duel' AND c.played_at >= ?
+                ORDER BY c.played_at, c.source_id, c.user_id
+                """,
+                (chat_id, since),
+            )
+            duels = [
+                (
+                    int(row["source_id"]),
+                    int(row["user_id"]),
+                    str(row["name"]),
+                    int(row["delta"]),
+                    int(row["place"]),
+                    int(row["played_at"]),
+                )
+                for row in await cursor.fetchall()
+            ]
+            cursor = await self.conn.execute(
+                """
+                SELECT
+                    c.user_id,
+                    COALESCE(NULLIF(pl.first_name, ''), 'Игрок') AS name,
+                    c.delta,
+                    c.place,
+                    b.stake
+                FROM contest_results c
+                LEFT JOIN players pl ON pl.user_id = c.user_id AND pl.chat_id = c.chat_id
+                LEFT JOIN battlecups b ON b.id = c.source_id
+                WHERE c.chat_id = ? AND c.kind = 'battlecup' AND c.played_at >= ?
+                ORDER BY c.played_at, c.source_id, c.user_id
+                """,
+                (chat_id, since),
+            )
+            cups = [
+                (
+                    int(row["user_id"]),
+                    str(row["name"]),
+                    int(row["delta"]),
+                    int(row["place"]),
+                    0 if row["stake"] is None else int(row["stake"]),
+                )
+                for row in await cursor.fetchall()
+            ]
+        return DayReport(measures, _day_duels(duels), _day_cups(cups))
 
     async def create_battlecup(self, *, chat_id: int, stake: int, starts_at: int) -> int | None:
         async with self._lock:
@@ -1759,6 +1865,95 @@ def _duel_haul(rows: list[tuple[str, int, int, str, int, int]]) -> DuelHaul | No
         if best is None or haul.amount > best.amount:
             best = haul
     return best
+
+
+def _day_duels(
+    rows: list[tuple[int, int, str, int, int, int]],
+) -> tuple[DuelScore, ...]:
+    grouped: dict[int, list[tuple[int, str, int, int, int]]] = {}
+    for source_id, user_id, name, delta, place, played_at in rows:
+        grouped.setdefault(source_id, []).append((user_id, name, delta, place, played_at))
+
+    @dataclass
+    class _Pair:
+        left_id: int
+        right_id: int
+        left_name: str
+        right_name: str
+        left_wins: int = 0
+        right_wins: int = 0
+        ties: int = 0
+        left_net: int = 0
+        first_at: int = 0
+
+    pairs: dict[tuple[int, int], _Pair] = {}
+    order: list[tuple[int, int]] = []
+    for participants in grouped.values():
+        people = sorted(participants, key=lambda item: item[0])
+        if len(people) != 2:
+            continue
+        left, right = people
+        key = (left[0], right[0])
+        pair = pairs.get(key)
+        if pair is None:
+            pair = _Pair(left[0], right[0], left[1], right[1])
+            pairs[key] = pair
+            order.append(key)
+        pair.left_name = left[1]
+        pair.right_name = right[1]
+        pair.first_at = left[4] if pair.first_at == 0 else min(pair.first_at, left[4])
+        if left[3] == 1:
+            pair.left_wins += 1
+        elif right[3] == 1:
+            pair.right_wins += 1
+        elif left[3] == 0 and right[3] == 0:
+            pair.ties += 1
+        pair.left_net += left[2]
+
+    scores: list[DuelScore] = []
+    for key in sorted(order, key=lambda item: (pairs[item].first_at, item)):
+        pair = pairs[key]
+        left_rank = (pair.left_wins, pair.left_net, -pair.left_id)
+        right_rank = (pair.right_wins, -pair.left_net, -pair.right_id)
+        if right_rank > left_rank:
+            scores.append(
+                DuelScore(
+                    pair.right_name,
+                    pair.left_name,
+                    pair.right_wins,
+                    pair.left_wins,
+                    pair.ties,
+                    -pair.left_net,
+                )
+            )
+        else:
+            scores.append(
+                DuelScore(
+                    pair.left_name,
+                    pair.right_name,
+                    pair.left_wins,
+                    pair.right_wins,
+                    pair.ties,
+                    pair.left_net,
+                )
+            )
+    return tuple(scores)
+
+
+def _day_cups(rows: list[tuple[int, str, int, int, int]]) -> tuple[CupStanding, ...]:
+    standings: dict[int, list[int | str]] = {}
+    for user_id, name, delta, place, stake in rows:
+        if place != 1:
+            continue
+        row = standings.get(user_id)
+        if row is None:
+            row = [name, 0, 0]
+            standings[user_id] = row
+        row[0] = name
+        row[1] = int(row[1]) + 1
+        row[2] = int(row[2]) + delta + stake
+    ordered = sorted(standings.items(), key=lambda item: (-int(item[1][1]), -int(item[1][2]), item[0]))
+    return tuple(CupStanding(str(row[0]), int(row[1]), int(row[2])) for _user_id, row in ordered)
 
 
 def contest_places(rolls: dict[int, int]) -> dict[int, int]:
