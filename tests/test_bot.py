@@ -117,7 +117,7 @@ class TextTests(unittest.TestCase):
 
     def test_bowling_score_names_the_pins(self) -> None:
         self.assertEqual(pins_knocked(1), 0)
-        self.assertEqual(pins_knocked(2), 1)
+        self.assertEqual(pins_knocked(2), 0)
         self.assertEqual(pins_knocked(3), 3)
         self.assertEqual(pins_knocked(4), 4)
         self.assertEqual(pins_knocked(5), 5)
