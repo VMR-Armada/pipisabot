@@ -192,8 +192,8 @@ def battlecup_announce(*, starts_in: int, stake: int, names: list[str]) -> str:
     return "\n".join(lines)
 
 
-# Номер анимации Telegram. 1 и 2 — мимо, оба без кеглей.
-_PINS = {1: 0, 2: 0, 3: 3, 4: 4, 5: 5, 6: 6}
+# Номер анимации Telegram. 1 — мимо, 2 — одна кегля.
+_PINS = {1: 0, 2: 1, 3: 3, 4: 4, 5: 5, 6: 6}
 
 
 def pins_knocked(value: int) -> int:
