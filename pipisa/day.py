@@ -22,3 +22,12 @@ def can_play(now: int, last_played: int | None, zone: tzinfo) -> bool:
 
 def seconds_until_next_day(now: int, zone: tzinfo) -> int:
     return max(0, next_midnight(now, zone) - now)
+
+
+def period_start(timestamp: int, zone: tzinfo, *, week: bool) -> int:
+    current = datetime.fromtimestamp(timestamp, zone)
+    start = current.date()
+    if week:
+        start = start - timedelta(days=start.weekday())
+    midnight = datetime(start.year, start.month, start.day, tzinfo=zone)
+    return int(midnight.timestamp())

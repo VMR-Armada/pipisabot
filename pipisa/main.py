@@ -24,6 +24,8 @@ GROUP_COMMANDS = [
     BotCommand(command="global_top", description="Глобальный топ 10"),
     BotCommand(command="global_top_pic", description="Глобальный топ картинкой"),
     BotCommand(command="stats", description="Статистика картинкой"),
+    BotCommand(command="day_review", description="Шуточные итоги дня"),
+    BotCommand(command="week_review", description="Шуточные итоги недели"),
     BotCommand(command="duel", description="Вызвать ответом или по нику"),
     BotCommand(command="ffa", description="Открытый вызов, принять может любой"),
     BotCommand(command="battlecup", description="5 бросков, старт через 10 минут"),

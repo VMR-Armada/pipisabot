@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import html
 import random
+from datetime import datetime, timezone, tzinfo
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pipisa.db import BattlecupOutcome, DuelOutcome
+    from pipisa.db import BattlecupOutcome, DuelOutcome, PeriodReview
 
 HELP_TEXT = (
     "Я линейка — шуточная игра для групповых чатов.\n\n"
@@ -18,6 +19,8 @@ HELP_TEXT = (
     "/global_top — топ 10 по всем чатам. Размер из этого чата, если человек здесь играет\n"
     "/global_top_pic — тот же глобальный топ картинкой\n"
     "/stats — карточка статистики\n"
+    "/day_review — шутливые итоги дня: каждый замер этого чата, плюс дуэли и баттлкапы\n"
+    "/week_review — шутливые итоги недели в этом чате\n"
     "/duel — дуэль на кубиках: ответом на сообщение или через /duel @ник. Вызов можно отменить, пока его не приняли\n"
     "/ffa — открытый вызов: принять может любой, кто уже делал замер\n"
     "/battlecup — турнир через 10 минут, можно указать свои: /battlecup 5. Пять бросков по очереди, между раундами минута, банк забирает большая сумма\n"
@@ -202,6 +205,127 @@ def bowling_score(pins: int) -> str:
     if pins <= 0:
         return "мимо, 0 кеглей"
     return f"{pins} {plural(pins, 'кегля', 'кегли', 'кеглей')}"
+
+
+def review_text(review: PeriodReview, *, week: bool, zone: tzinfo | None = None) -> str:
+    title = "Итоги недели" if week else "Итоги дня"
+    when = "за неделю" if week else "сегодня"
+    if review.plays == 0 and review.duels == 0 and review.cups == 0:
+        return (
+            f"📅 <b>{title}</b>\n\n"
+            "Пока пусто. Ни замеров, ни дуэлей, ни баттлкапов. "
+            "Линейка обиженно молчит. Разбудите её командой /dick."
+        )
+    lines = [f"📅 <b>{title}</b>", ""]
+    if review.plays:
+        lines.append(
+            f"{when.capitalize()} линейка поработала <b>{review.plays}</b> "
+            f"{plural(review.plays, 'раз', 'раза', 'раз')} и нарисовала суммарно "
+            f"<b>{format_signed_cm(review.play_sum)}</b>."
+        )
+        if review.best_growth is not None:
+            lines.append(
+                f"{_safe(review.best_growth.name)} вырос сильнее всех: "
+                f"<b>{format_signed_cm(review.best_growth.value)}</b>. Линейка явно была за него."
+            )
+        if review.worst_growth is not None:
+            lines.append(
+                f"{_safe(review.worst_growth.name)} усох на "
+                f"<b>{format_cm(review.worst_growth.value)}</b>. "
+                f"Бывает, линейка {'на этой неделе' if week else 'сегодня'} вредная."
+            )
+        if review.best_measure is not None:
+            lines.append(
+                f"Самый щедрый замер — {_safe(review.best_measure.name)}, "
+                f"<b>{format_signed_cm(review.best_measure.value)}</b>."
+            )
+        if review.worst_measure is not None:
+            lines.append(
+                f"Самый обидный — {_safe(review.worst_measure.name)}, "
+                f"<b>{format_cm(review.worst_measure.value)}</b>."
+            )
+        if not week:
+            clock = zone or timezone.utc
+            lines.append("")
+            lines.append("Все замеры:")
+            for measure in review.measures:
+                stamp = datetime.fromtimestamp(measure.played_at, clock).strftime("%H:%M")
+                lines.append(
+                    f"{stamp} — {_safe(measure.name)}: <b>{format_signed_cm(measure.delta)}</b>, "
+                    f"стало <b>{format_cm(measure.size_after)}</b>."
+                )
+        lines.append("")
+    if review.duels:
+        lines.append(
+            f"Дуэлей: <b>{review.duels}</b>. "
+            + (
+                f"{_safe(review.duel_leader.name)} забрал <b>{review.duel_leader.value}</b> "
+                f"{plural(review.duel_leader.value, 'победу', 'победы', 'побед')}. Кубик был на коротком поводке."
+                if review.duel_leader is not None
+                else "Все разошлись миром. Кубик сегодня дипломат."
+            )
+        )
+        if review.duel_haul is not None:
+            lines.append(
+                f"Самая жирная дуэль: {_safe(review.duel_haul.winner)} против "
+                f"{_safe(review.duel_haul.loser)}, <b>{format_cm(review.duel_haul.amount)}</b> ушли победителю."
+            )
+        lines.append("")
+    if review.cups:
+        lines.append(
+            f"Баттлкапов: <b>{review.cups}</b>. "
+            + (
+                f"Первое место чаще у {_safe(review.cup_leader.name)} "
+                f"(<b>{review.cup_leader.value}</b>)."
+                if review.cup_leader is not None
+                else "Первое место так и не выбрали. Банк обиделся."
+            )
+        )
+        if review.cup_sponsor is not None:
+            lines.append(
+                f"{_safe(review.cup_sponsor.name)} оплатил чужой праздник: "
+                f"<b>{format_cm(review.cup_sponsor.value)}</b>."
+            )
+        lines.append("")
+    closing = (
+        (
+            "Неделя сдана. Линейка берёт выходной до понедельника. Шутка: /dick работает каждый день.",
+            "Семь дней, одна линейка, ноль жалости.",
+            "Неделя в архиве. Размеры остаются, стыд тоже.",
+        )
+        if week
+        else (
+            "День закрыт. Завтра линейка снова голодная.",
+            "На сегодня хватит. Линейка идёт спать.",
+            "Итог сдан. Кто не мерился, тот сам виноват.",
+        )
+    )
+    lines.append(random.choice(closing))
+    return "\n".join(lines).strip()
+
+
+def split_html(text: str, limit: int = 4000) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+    parts: list[str] = []
+    chunk: list[str] = []
+    size = 0
+    for line in text.split("\n"):
+        extra = len(line) if not chunk else len(line) + 1
+        if chunk and size + extra > limit:
+            parts.append("\n".join(chunk))
+            chunk = [line]
+            size = len(line)
+        else:
+            chunk.append(line)
+            size += extra
+    if chunk:
+        parts.append("\n".join(chunk))
+    return parts
+
+
+def _safe(name: str) -> str:
+    return html.escape(name.strip() or "Игрок")
 
 
 def _winner_compliment(names: list[str]) -> str:

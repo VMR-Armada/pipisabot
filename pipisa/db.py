@@ -11,7 +11,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from pipisa.day import can_play, next_midnight, seconds_until_next_day
+from pipisa.day import can_play, next_midnight, period_start, seconds_until_next_day
 from pipisa.transfer import ImportItem
 
 Clock = Callable[[], int]
@@ -85,6 +85,44 @@ class BattlecupPayout:
 class BattlecupOutcome:
     pool: int
     payouts: list[BattlecupPayout]
+
+
+@dataclass(frozen=True)
+class NamedValue:
+    name: str
+    value: int
+
+
+@dataclass(frozen=True)
+class Measure:
+    name: str
+    delta: int
+    size_after: int
+    played_at: int
+
+
+@dataclass(frozen=True)
+class DuelHaul:
+    winner: str
+    loser: str
+    amount: int
+
+
+@dataclass(frozen=True)
+class PeriodReview:
+    plays: int
+    play_sum: int
+    best_growth: NamedValue | None
+    worst_growth: NamedValue | None
+    best_measure: NamedValue | None
+    worst_measure: NamedValue | None
+    duels: int
+    duel_leader: NamedValue | None
+    duel_haul: DuelHaul | None
+    cups: int
+    cup_leader: NamedValue | None
+    cup_sponsor: NamedValue | None
+    measures: tuple[Measure, ...] = ()
 
 
 @dataclass
@@ -822,6 +860,62 @@ class Database:
             entries = [_entry(row) for row in await cursor.fetchall()]
             standing = await self._global_standing(user_id, chat_id)
             return entries, standing
+
+    async def chat_review(self, chat_id: int, *, week: bool) -> PeriodReview:
+        since = period_start(self._clock(), self.zone, week=week)
+        async with self._lock:
+            cursor = await self.conn.execute(
+                """
+                SELECT
+                    p.user_id,
+                    COALESCE(NULLIF(pl.first_name, ''), 'Игрок') AS name,
+                    p.delta,
+                    p.size_after,
+                    p.played_at
+                FROM plays p
+                LEFT JOIN players pl ON pl.user_id = p.user_id AND pl.chat_id = p.chat_id
+                WHERE p.chat_id = ? AND p.played_at >= ?
+                ORDER BY p.played_at, p.id
+                """,
+                (chat_id, since),
+            )
+            plays = [
+                (
+                    int(row["user_id"]),
+                    str(row["name"]),
+                    int(row["delta"]),
+                    int(row["size_after"]),
+                    int(row["played_at"]),
+                )
+                for row in await cursor.fetchall()
+            ]
+            cursor = await self.conn.execute(
+                """
+                SELECT
+                    c.kind,
+                    c.source_id,
+                    c.user_id,
+                    c.delta,
+                    c.place,
+                    COALESCE(NULLIF(pl.first_name, ''), 'Игрок') AS name
+                FROM contest_results c
+                LEFT JOIN players pl ON pl.user_id = c.user_id AND pl.chat_id = c.chat_id
+                WHERE c.chat_id = ? AND c.played_at >= ?
+                """,
+                (chat_id, since),
+            )
+            contests = [
+                (
+                    str(row["kind"]),
+                    int(row["source_id"]),
+                    int(row["user_id"]),
+                    str(row["name"]),
+                    int(row["delta"]),
+                    int(row["place"]),
+                )
+                for row in await cursor.fetchall()
+            ]
+        return _period_review(plays, contests)
 
     async def create_battlecup(self, *, chat_id: int, stake: int, starts_at: int) -> int | None:
         async with self._lock:
@@ -1584,6 +1678,87 @@ def play_streaks(deltas: list[int]) -> tuple[int, int]:
             run = 0
             sign = 0
     return best, worst
+
+
+def _period_review(
+    plays: list[tuple[int, str, int, int, int]],
+    contests: list[tuple[str, int, int, str, int, int]],
+) -> PeriodReview:
+    totals: dict[int, int] = {}
+    names: dict[int, str] = {}
+    for user_id, name, delta, _size_after, _played_at in plays:
+        totals[user_id] = totals.get(user_id, 0) + delta
+        names[user_id] = name
+    growth = [(user_id, names[user_id], total) for user_id, total in totals.items()]
+    measures = [(user_id, name, delta) for user_id, name, delta, _size_after, _played_at in plays]
+
+    duel_rows = [row for row in contests if row[0] == "duel"]
+    cup_rows = [row for row in contests if row[0] == "battlecup"]
+    duel_ids = {row[1] for row in duel_rows}
+    cup_ids = {row[1] for row in cup_rows}
+    wins: dict[int, int] = {}
+    cup_wins: dict[int, int] = {}
+    cup_nets: dict[int, int] = {}
+    for _kind, _source_id, user_id, name, delta, place in duel_rows:
+        names[user_id] = name
+        if place == 1:
+            wins[user_id] = wins.get(user_id, 0) + 1
+    for _kind, _source_id, user_id, name, delta, place in cup_rows:
+        names[user_id] = name
+        cup_nets[user_id] = cup_nets.get(user_id, 0) + delta
+        if place == 1:
+            cup_wins[user_id] = cup_wins.get(user_id, 0) + 1
+
+    return PeriodReview(
+        plays=len(plays),
+        play_sum=sum(delta for _user_id, _name, delta, _size_after, _played_at in plays),
+        best_growth=_highest(growth),
+        worst_growth=_lowest(growth),
+        best_measure=_highest(measures),
+        worst_measure=_lowest(measures),
+        duels=len(duel_ids),
+        duel_leader=_highest([(user_id, names[user_id], count) for user_id, count in wins.items()]),
+        duel_haul=_duel_haul(duel_rows),
+        cups=len(cup_ids),
+        cup_leader=_highest([(user_id, names[user_id], count) for user_id, count in cup_wins.items()]),
+        cup_sponsor=_lowest([(user_id, names[user_id], total) for user_id, total in cup_nets.items()]),
+        measures=tuple(
+            Measure(name, delta, size_after, played_at)
+            for _user_id, name, delta, size_after, played_at in plays
+        ),
+    )
+
+
+def _highest(rows: list[tuple[int, str, int]]) -> NamedValue | None:
+    positive = [row for row in rows if row[2] > 0]
+    if not positive:
+        return None
+    user_id, name, value = max(positive, key=lambda row: (row[2], -row[0]))
+    return NamedValue(name, value)
+
+
+def _lowest(rows: list[tuple[int, str, int]]) -> NamedValue | None:
+    negative = [row for row in rows if row[2] < 0]
+    if not negative:
+        return None
+    _user_id, name, value = min(negative, key=lambda row: (row[2], row[0]))
+    return NamedValue(name, value)
+
+
+def _duel_haul(rows: list[tuple[str, int, int, str, int, int]]) -> DuelHaul | None:
+    by_source: dict[int, list[tuple[str, int, int]]] = {}
+    for _kind, source_id, _user_id, name, delta, place in rows:
+        by_source.setdefault(source_id, []).append((name, delta, place))
+    best: DuelHaul | None = None
+    for participants in by_source.values():
+        winner = next((item for item in participants if item[2] == 1 and item[1] > 0), None)
+        loser = next((item for item in participants if item[2] == 2), None)
+        if winner is None or loser is None:
+            continue
+        haul = DuelHaul(winner[0], loser[0], winner[1])
+        if best is None or haul.amount > best.amount:
+            best = haul
+    return best
 
 
 def contest_places(rolls: dict[int, int]) -> dict[int, int]:

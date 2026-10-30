@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
-from datetime import timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from PIL import Image
@@ -14,7 +14,7 @@ from PIL import Image
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
 from pipisa.battlecup import countdown_seconds, parse_battlecup_minutes, play_battlecup, round_pause
-from pipisa.day import next_midnight
+from pipisa.day import next_midnight, period_start
 
 from pipisa.db import (
     Battlecup,
@@ -22,7 +22,11 @@ from pipisa.db import (
     BattlecupPayout,
     BattlecupPlayer,
     Database,
+    DuelHaul,
     Entry,
+    Measure,
+    NamedValue,
+    PeriodReview,
     play_streaks,
     prize_shares,
 )
@@ -35,6 +39,8 @@ from pipisa.texts import (
     battlecup_round,
     bowling_score,
     pins_knocked,
+    review_text,
+    split_html,
     clear_disabled,
     clear_enabled,
     duel_refusal,
@@ -117,6 +123,91 @@ class TextTests(unittest.TestCase):
         self.assertEqual(bowling_score(4), "4 кегли")
         self.assertEqual(bowling_score(5), "5 кеглей")
         self.assertEqual(bowling_score(6), "страйк, 6 кеглей")
+
+    def test_period_starts_at_local_midnight_or_monday(self) -> None:
+        friday = datetime(2026, 10, 30, 15, tzinfo=timezone.utc)
+        moment = int(friday.timestamp())
+        self.assertEqual(period_start(moment, timezone.utc, week=False), int(datetime(2026, 10, 30, tzinfo=timezone.utc).timestamp()))
+        self.assertEqual(period_start(moment, timezone.utc, week=True), int(datetime(2026, 10, 26, tzinfo=timezone.utc).timestamp()))
+
+    def test_review_tells_the_day_and_stays_quiet_when_empty(self) -> None:
+        empty = PeriodReview(
+            plays=0,
+            play_sum=0,
+            best_growth=None,
+            worst_growth=None,
+            best_measure=None,
+            worst_measure=None,
+            duels=0,
+            duel_leader=None,
+            duel_haul=None,
+            cups=0,
+            cup_leader=None,
+            cup_sponsor=None,
+        )
+        quiet = review_text(empty, week=False)
+        self.assertIn("Итоги дня", quiet)
+        self.assertIn("Пока пусто", quiet)
+        self.assertIn("/dick", quiet)
+
+        busy = PeriodReview(
+            plays=2,
+            play_sum=8,
+            best_growth=NamedValue("Анна", 10),
+            worst_growth=NamedValue("Борис", -2),
+            best_measure=NamedValue("Анна", 10),
+            worst_measure=NamedValue("Борис", -2),
+            duels=1,
+            duel_leader=NamedValue("Анна", 1),
+            duel_haul=DuelHaul("Анна", "Борис", 4),
+            cups=1,
+            cup_leader=NamedValue("Анна", 1),
+            cup_sponsor=NamedValue("Борис", -2),
+        )
+        with patch("pipisa.texts.random.choice", side_effect=lambda pool: pool[0]):
+            text = review_text(busy, week=True)
+        self.assertIn("Итоги недели", text)
+        self.assertIn("За неделю линейка поработала <b>2</b> раза", text)
+        self.assertIn("Анна вырос сильнее всех: <b>+10 см</b>", text)
+        self.assertIn("Борис усох на <b>−2 см</b>", text)
+        self.assertIn("Анна против Борис, <b>4 см</b> ушли победителю", text)
+        self.assertIn("оплатил чужой праздник", text)
+        self.assertIn("Неделя сдана", text)
+        self.assertNotIn("Все замеры", text)
+
+        morning = int(datetime(2026, 10, 30, 9, tzinfo=timezone.utc).timestamp())
+        evening = int(datetime(2026, 10, 30, 18, 5, tzinfo=timezone.utc).timestamp())
+        listed = PeriodReview(
+            plays=2,
+            play_sum=8,
+            best_growth=NamedValue("Анна", 10),
+            worst_growth=NamedValue("Борис", -2),
+            best_measure=NamedValue("Анна", 10),
+            worst_measure=NamedValue("Борис", -2),
+            duels=0,
+            duel_leader=None,
+            duel_haul=None,
+            cups=0,
+            cup_leader=None,
+            cup_sponsor=None,
+            measures=(
+                Measure("Борис", -2, 13, morning),
+                Measure("Анна", 10, 30, evening),
+            ),
+        )
+        with patch("pipisa.texts.random.choice", side_effect=lambda pool: pool[0]):
+            day = review_text(listed, week=False, zone=timezone.utc)
+        roster = day.split("Все замеры:", 1)[1]
+        self.assertIn("09:00 — Борис: <b>−2 см</b>, стало <b>13 см</b>.", roster)
+        self.assertIn("18:05 — Анна: <b>+10 см</b>, стало <b>30 см</b>.", roster)
+        self.assertLess(roster.index("09:00"), roster.index("18:05"))
+
+    def test_long_review_is_split_on_line_breaks(self) -> None:
+        text = "\n".join(f"строка {index}" for index in range(10))
+        parts = split_html(text, limit=20)
+        self.assertGreater(len(parts), 1)
+        self.assertEqual("\n".join(parts), text)
+        self.assertTrue(all(len(part) <= 20 or "\n" not in part for part in parts))
 
     def test_clear_names_the_age(self) -> None:
         self.assertIn("старше 20 минут", clear_enabled(20))
@@ -669,6 +760,64 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         ffa_id = await self.db.create_ffa_duel(chat_id=-100, challenger_id=1)
         assert ffa_id is not None
         self.assertTrue(await self.db.claim_duel(ffa_id, 2))
+
+    async def test_review_keeps_this_chat_and_this_period(self) -> None:
+        sunday = int(datetime(2026, 10, 25, 12, tzinfo=timezone.utc).timestamp())
+        thursday = int(datetime(2026, 10, 29, 12, tzinfo=timezone.utc).timestamp())
+        friday = int(datetime(2026, 10, 30, 12, tzinfo=timezone.utc).timestamp())
+
+        self.now = sunday
+        await self.db.try_grow(
+            user_id=1, chat_id=-100, username="ann", first_name="Анна", chat_title="Чат", rng=lambda: 4
+        )
+        self.now = thursday
+        await self.db.try_grow(
+            user_id=2, chat_id=-100, username="boris", first_name="Борис", chat_title="Чат", rng=lambda: -2
+        )
+        self.now = friday
+        await self.db.try_grow(
+            user_id=1, chat_id=-100, username="ann", first_name="Анна", chat_title="Чат", rng=lambda: 10
+        )
+        await self.db.try_grow(
+            user_id=1, chat_id=-200, username="ann", first_name="Анна", chat_title="Другой", rng=lambda: 8
+        )
+        duel_id = await self.db.create_duel(chat_id=-100, challenger_id=1, opponent_id=2)
+        assert duel_id is not None
+        self.assertTrue(await self.db.claim_duel(duel_id, 2))
+        self.assertIsNotNone(await self.db.apply_duel(duel_id, 6, 2))
+        cup_id = await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=friday)
+        assert cup_id is not None
+        self.assertEqual(await self.db.join_battlecup(cup_id, 1), "joined")
+        self.assertEqual(await self.db.join_battlecup(cup_id, 2), "joined")
+        self.assertEqual(len(await self.db.claim_due_battlecups(friday)), 1)
+        self.assertIsNotNone(await self.db.finish_battlecup(cup_id, {1: 6, 2: 1}))
+
+        day = await self.db.chat_review(-100, week=False)
+        self.assertEqual(day.plays, 1)
+        self.assertEqual([(item.name, item.delta, item.size_after) for item in day.measures], [("Анна", 10, 14)])
+        self.assertEqual(day.play_sum, 10)
+        assert day.best_growth is not None
+        self.assertEqual((day.best_growth.name, day.best_growth.value), ("Анна", 10))
+        self.assertIsNone(day.worst_growth)
+        self.assertEqual(day.duels, 1)
+        assert day.duel_haul is not None
+        self.assertEqual((day.duel_haul.winner, day.duel_haul.loser, day.duel_haul.amount), ("Анна", "Борис", 4))
+        self.assertEqual(day.cups, 1)
+        assert day.cup_sponsor is not None
+        self.assertEqual(day.cup_sponsor.name, "Борис")
+        self.assertLess(day.cup_sponsor.value, 0)
+
+        week = await self.db.chat_review(-100, week=True)
+        self.assertEqual(week.plays, 2)
+        self.assertEqual(
+            [(item.name, item.delta, item.size_after) for item in week.measures],
+            [("Борис", -2, -2), ("Анна", 10, 14)],
+        )
+        self.assertEqual(week.play_sum, 8)
+        assert week.worst_growth is not None
+        self.assertEqual((week.worst_growth.name, week.worst_growth.value), ("Борис", -2))
+        self.assertEqual(week.duels, 1)
+        self.assertEqual(week.cups, 1)
 
 
 class CardTests(unittest.TestCase):
