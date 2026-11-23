@@ -696,6 +696,100 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after.size, before.size + 2)
         self.assertIsNotNone(await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=self.now))
 
+    async def test_organizer_and_auto_join_enter_open_tournaments(self) -> None:
+        for user_id, username, first_name in (
+            (1, "anna", "Анна"),
+            (2, "boris", "Борис"),
+        ):
+            await self.db.set_size(
+                user_id=user_id,
+                chat_id=-100,
+                username=username,
+                first_name=first_name,
+                chat_title="Чат",
+                size=20,
+            )
+        self.assertIsNone(await self.db.toggle_auto_join(9, -100))
+        self.assertTrue(await self.db.toggle_auto_join(2, -100))
+
+        cup_id = await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=self.now + 300)
+        assert cup_id is not None
+        self.assertEqual(await self.db.enroll_tournament(cup_id, 1), "joined")
+        self.assertEqual(await self.db.enroll_tournament(cup_id, 1), "already")
+        cup = await self.db.get_battlecup(cup_id)
+        assert cup is not None
+        self.assertEqual([player.user_id for player in cup.players], [1, 2])
+        anna = await self.db.find_player(1, -100)
+        boris = await self.db.find_player(2, -100)
+        assert anna is not None and boris is not None
+        self.assertEqual(anna.size, 18)
+        self.assertEqual(boris.size, 18)
+
+        darts_id = await self.db.create_battlecup(
+            chat_id=-100, stake=2, starts_at=self.now + 300, kind="darts"
+        )
+        assert darts_id is not None
+        self.assertEqual(await self.db.enroll_tournament(darts_id, 2), "joined")
+        darts = await self.db.get_battlecup(darts_id)
+        assert darts is not None
+        self.assertEqual([player.user_id for player in darts.players], [2])
+        boris = await self.db.find_player(2, -100)
+        assert boris is not None
+        self.assertEqual(boris.size, 16)
+
+        claimed = await self.db.claim_due_battlecups(self.now + 300)
+        self.assertEqual({item.id for item in claimed}, {cup_id, darts_id})
+        self.assertIsNotNone(await self.db.refund_battlecup(cup_id))
+        self.assertIsNotNone(await self.db.refund_battlecup(darts_id))
+        self.assertFalse(await self.db.toggle_auto_join(2, -100))
+
+        quiet_id = await self.db.create_battlecup(chat_id=-100, stake=2, starts_at=self.now + 600)
+        assert quiet_id is not None
+        self.assertEqual(await self.db.enroll_tournament(quiet_id, 1), "joined")
+        quiet = await self.db.get_battlecup(quiet_id)
+        assert quiet is not None
+        self.assertEqual([player.user_id for player in quiet.players], [1])
+
+        pending_darts = await self.db.create_battlecup(
+            chat_id=-100, stake=2, starts_at=self.now + 900, kind="darts"
+        )
+        assert pending_darts is not None
+        running_id = await self.db.create_battlecup(chat_id=-400, stake=2, starts_at=self.now)
+        assert running_id is not None
+        self.assertEqual(len(await self.db.claim_due_battlecups(self.now)), 1)
+        await self.db.set_size(
+            user_id=1, chat_id=-400, username="anna", first_name="Анна", chat_title="Чат", size=20
+        )
+        self.assertEqual(await self.db.join_open_tournaments(-400, 1), [])
+
+        self.assertTrue(await self.db.toggle_auto_join(1, -100))
+        self.assertEqual(await self.db.join_open_tournaments(-100, 1), [pending_darts])
+        darts_pending = await self.db.get_battlecup(pending_darts)
+        assert darts_pending is not None
+        self.assertEqual([player.user_id for player in darts_pending.players], [1])
+        anna = await self.db.find_player(1, -100)
+        boris = await self.db.find_player(2, -100)
+        assert anna is not None and boris is not None
+        self.assertEqual(anna.size, 16)
+        self.assertEqual(boris.size, 20)
+
+        other_id = await self.db.create_battlecup(chat_id=-200, stake=2, starts_at=self.now + 600)
+        assert other_id is not None
+        await self.db.set_size(
+            user_id=1, chat_id=-200, username="anna", first_name="Анна", chat_title="Другой", size=20
+        )
+        self.assertEqual(await self.db.enroll_tournament(other_id, 1), "joined")
+        other = await self.db.get_battlecup(other_id)
+        assert other is not None
+        self.assertEqual([player.user_id for player in other.players], [1])
+
+        stranger = await self.db.create_battlecup(chat_id=-300, stake=2, starts_at=self.now + 900)
+        assert stranger is not None
+        self.assertEqual(await self.db.enroll_tournament(stranger, 9), "unknown")
+        empty = await self.db.get_battlecup(stranger)
+        assert empty is not None
+        self.assertEqual(empty.players, [])
+
     async def test_head_to_head_survives_old_contest_table(self) -> None:
         await self.db.set_size(
             user_id=1, chat_id=-100, username="ann", first_name="Анна", chat_title="Чат", size=20

@@ -32,6 +32,7 @@ GROUP_COMMANDS = [
     BotCommand(command="ffa", description="Открытый вызов, принять может любой"),
     BotCommand(command="battlecup", description="5 бросков, старт через 10 минут"),
     BotCommand(command="darts", description="5 бросков дротика, старт через 10 минут"),
+    BotCommand(command="allin", description="Автозапись на баттлкапы и дартс"),
     BotCommand(command="clear", description="Удалять сообщения бота через N минут"),
     BotCommand(command="help", description="Как играть"),
 ]

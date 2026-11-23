@@ -313,6 +313,12 @@ class Database:
                 ref_id INTEGER,
                 PRIMARY KEY (chat_id, message_id)
             );
+
+            CREATE TABLE IF NOT EXISTS auto_joins (
+                user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                PRIMARY KEY (user_id, chat_id)
+            );
             """
         )
         await self._ensure_nullable_duel_opponent()
@@ -1107,6 +1113,69 @@ class Database:
             except Exception:
                 await self.conn.rollback()
                 raise
+
+    async def enroll_tournament(self, battlecup_id: int, organizer_id: int) -> str:
+        cup = await self.get_battlecup(battlecup_id)
+        if cup is None:
+            return "closed"
+        result = await self.join_battlecup(battlecup_id, organizer_id)
+        for user_id in await self.auto_join_user_ids(cup.chat_id):
+            if user_id != organizer_id:
+                await self.join_battlecup(battlecup_id, user_id)
+        return result
+
+    async def toggle_auto_join(self, user_id: int, chat_id: int) -> bool | None:
+        async with self._lock:
+            try:
+                row = await self._get_row(user_id, chat_id)
+                if row is None or int(row["plays"]) <= 0:
+                    await self.conn.commit()
+                    return None
+                cursor = await self.conn.execute(
+                    "SELECT 1 FROM auto_joins WHERE user_id = ? AND chat_id = ?",
+                    (user_id, chat_id),
+                )
+                enabled = await cursor.fetchone() is not None
+                if enabled:
+                    await self.conn.execute(
+                        "DELETE FROM auto_joins WHERE user_id = ? AND chat_id = ?",
+                        (user_id, chat_id),
+                    )
+                else:
+                    await self.conn.execute(
+                        "INSERT INTO auto_joins (user_id, chat_id) VALUES (?, ?)",
+                        (user_id, chat_id),
+                    )
+                await self.conn.commit()
+                return not enabled
+            except Exception:
+                await self.conn.rollback()
+                raise
+
+    async def auto_join_user_ids(self, chat_id: int) -> list[int]:
+        async with self._lock:
+            cursor = await self.conn.execute(
+                "SELECT user_id FROM auto_joins WHERE chat_id = ? ORDER BY user_id",
+                (chat_id,),
+            )
+            return [int(row["user_id"]) for row in await cursor.fetchall()]
+
+    async def join_open_tournaments(self, chat_id: int, user_id: int) -> list[int]:
+        async with self._lock:
+            cursor = await self.conn.execute(
+                """
+                SELECT id FROM battlecups
+                WHERE chat_id = ? AND status = 'pending'
+                ORDER BY starts_at, id
+                """,
+                (chat_id,),
+            )
+            ids = [int(row["id"]) for row in await cursor.fetchall()]
+        joined: list[int] = []
+        for battlecup_id in ids:
+            if await self.join_battlecup(battlecup_id, user_id) == "joined":
+                joined.append(battlecup_id)
+        return joined
 
     async def requeue_running_battlecups(self, now: int) -> None:
         async with self._lock:

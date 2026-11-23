@@ -38,6 +38,9 @@ from pipisa.texts import (
     GROUP_ONLY,
     HELP_TEXT,
     PRIVATE_WELCOME,
+    allin_disabled,
+    allin_enabled,
+    allin_needs_measure,
     ffa_challenge,
     clear_disabled,
     clear_enabled,
@@ -682,6 +685,7 @@ async def _open_tournament(message: Message, command: CommandObject, db: Databas
     if tournament_id is None:
         await message.reply(f"В этом чате уже есть {title}.")
         return
+    joined = await db.enroll_tournament(tournament_id, message.from_user.id)
     cup = await db.get_battlecup(tournament_id)
     if cup is None:
         await message.reply(f"Не удалось открыть {title}.")
@@ -692,6 +696,43 @@ async def _open_tournament(message: Message, command: CommandObject, db: Databas
     )
     await db.set_battlecup_message(tournament_id, sent.message_id)
     await db.hold_message(sent.chat.id, sent.message_id, kind=kind, ref_id=tournament_id)
+    if joined == "unknown":
+        await message.reply(allin_needs_measure())
+
+
+@router.message(Command("allin"))
+async def cmd_allin(message: Message, db: Database) -> None:
+    if message.from_user is None or message.from_user.is_bot:
+        return
+    if not _is_group(message):
+        await message.answer(GROUP_ONLY)
+        return
+    enabled = await db.toggle_auto_join(message.from_user.id, message.chat.id)
+    if enabled is None:
+        await message.reply(allin_needs_measure())
+        return
+    if not enabled:
+        await message.reply(allin_disabled())
+        return
+    joined = await db.join_open_tournaments(message.chat.id, message.from_user.id)
+    for battlecup_id in joined:
+        await _refresh_battlecup_message(message.bot, db, battlecup_id)
+    await message.reply(allin_enabled(len(joined)))
+
+
+async def _refresh_battlecup_message(bot: Bot, db: Database, battlecup_id: int) -> None:
+    cup = await db.get_battlecup(battlecup_id)
+    if cup is None or cup.status != "pending" or cup.message_id is None:
+        return
+    try:
+        await bot.edit_message_text(
+            announcement_text(cup, int(time.time())),
+            chat_id=cup.chat_id,
+            message_id=cup.message_id,
+            reply_markup=join_keyboard(battlecup_id),
+        )
+    except TelegramBadRequest:
+        logger.info("Не смог обновить набор баттлкапа %s", battlecup_id)
 
 
 @router.message(Command("clear"))
@@ -733,7 +774,7 @@ async def cb_battlecup_join(query: CallbackQuery, db: Database) -> None:
         return
     result = await db.join_battlecup(battlecup_id, query.from_user.id)
     if result == "unknown":
-        await query.answer("Сначала сделай /dick, чтобы было что ставить.", show_alert=True)
+        await query.answer(allin_needs_measure(), show_alert=True)
         return
     if result == "already":
         await query.answer("Ты уже в игре.", show_alert=True)
